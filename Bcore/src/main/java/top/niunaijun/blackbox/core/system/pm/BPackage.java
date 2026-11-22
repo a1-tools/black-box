@@ -7,6 +7,7 @@ import android.content.pm.ApplicationInfo;
 import android.content.pm.ConfigurationInfo;
 import android.content.pm.FeatureInfo;
 import android.content.pm.InstrumentationInfo;
+import android.content.pm.PackageInfo;
 import android.content.pm.PackageParser;
 import android.content.pm.PermissionGroupInfo;
 import android.content.pm.PermissionInfo;
@@ -53,6 +54,70 @@ public class BPackage implements Parcelable {
     public ArrayList<FeatureInfo> reqFeatures = null;
 
     public InstallOption installOption;
+
+    public BPackage() {
+    }
+
+    /**
+     * Build a BPackage from the public PackageInfo API. API 33+ removed PackageParser and the
+     * reflection-built Package stub carries no components, so activities/services/receivers would
+     * be empty and no launch intent could be resolved. Public PM APIs still return the component
+     * list, so use that path when available.
+     */
+    public static BPackage fromPackageInfo(PackageInfo pi, String baseCodePath) {
+        BPackage pkg = new BPackage();
+        pkg.packageName = pi.packageName;
+        pkg.applicationInfo = pi.applicationInfo;
+        pkg.baseCodePath = baseCodePath;
+        if (pi.versionName != null) {
+            pkg.mVersionName = pi.versionName;
+        }
+        pkg.mVersionCode = pi.versionCode;
+        if (pi.requestedPermissions != null) {
+            for (String perm : pi.requestedPermissions) {
+                pkg.requestedPermissions.add(perm);
+            }
+        }
+        if (pi.activities != null) {
+            for (ActivityInfo info : pi.activities) {
+                if (info != null) {
+                    pkg.activities.add(new Activity(info));
+                }
+            }
+        }
+        if (pi.receivers != null) {
+            for (ActivityInfo info : pi.receivers) {
+                if (info != null) {
+                    pkg.receivers.add(new Activity(info));
+                }
+            }
+        }
+        if (pi.services != null) {
+            for (ServiceInfo info : pi.services) {
+                if (info != null) {
+                    pkg.services.add(new Service(info));
+                }
+            }
+        }
+        if (pi.providers != null) {
+            for (ProviderInfo info : pi.providers) {
+                if (info != null) {
+                    pkg.providers.add(new Provider(info));
+                }
+            }
+        }
+        Signature[] sigs = top.niunaijun.blackbox.utils.compat.PackageParserFix.getSignatures(pi);
+        pkg.mSignatures = sigs;
+        if (BuildCompat.isPie()) {
+            pkg.mSigningDetails = new SigningDetails(sigs);
+        }
+        android.util.Log.d("BPackage", "fromPackageInfo " + pi.packageName
+                + " activities=" + pkg.activities.size()
+                + " services=" + pkg.services.size()
+                + " receivers=" + pkg.receivers.size()
+                + " providers=" + pkg.providers.size());
+        return pkg;
+    }
 
     public BPackage(PackageParser.Package aPackage) {
         this.activities = new ArrayList<>(aPackage.activities.size());
@@ -245,6 +310,11 @@ public class BPackage implements Parcelable {
             }
         }
 
+        public Activity(ActivityInfo info) {
+            super(info.name, info.metaData);
+            this.info = info;
+        }
+
         public Activity(Parcel parcel) {
             super(parcel);
             this.info = parcel.readParcelable(ActivityInfo.class.getClassLoader());
@@ -272,6 +342,11 @@ public class BPackage implements Parcelable {
             }
         }
 
+        public Service(ServiceInfo info) {
+            super(info.name, info.metaData);
+            this.info = info;
+        }
+
         public Service(Parcel parcel) {
             super(parcel);
             info = parcel.readParcelable(ServiceInfo.class.getClassLoader());
@@ -297,6 +372,11 @@ public class BPackage implements Parcelable {
                     intents.add(new ProviderIntentInfo(intent));
                 }
             }
+        }
+
+        public Provider(ProviderInfo info) {
+            super(info.name, info.metaData);
+            this.info = info;
         }
 
         public Provider(Parcel parcel) {
@@ -451,6 +531,10 @@ public class BPackage implements Parcelable {
             }
         }
 
+        public SigningDetails(Signature[] signatures) {
+            this.signatures = signatures;
+        }
+
         protected SigningDetails(Parcel in) {
             this.signatures = in.createTypedArray(Signature.CREATOR);
         }
@@ -546,6 +630,13 @@ public class BPackage implements Parcelable {
         public Component(Parcel parcel) {
             this.className = parcel.readString();
             this.metaData = parcel.readBundle(Bundle.class.getClassLoader());
+        }
+
+        /** Build a component from a public PackageInfo entry (API 33+ path). */
+        public Component(String className, Bundle metaData) {
+            this.className = className;
+            this.metaData = metaData;
+            this.intents = new ArrayList<II>(0);
         }
 
         public Component(PackageParser.Component<?> component) {

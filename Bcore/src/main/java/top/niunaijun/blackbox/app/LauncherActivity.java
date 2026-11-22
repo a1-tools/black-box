@@ -33,10 +33,14 @@ public class LauncherActivity extends Activity {
             
             splash.setFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
             splash.putExtra(LauncherActivity.KEY_INTENT, intent);
-            splash.putExtra(LauncherActivity.KEY_PKG, intent.getPackage());
+            String launchPkg = intent.getPackage();
+            if (launchPkg == null && intent.getComponent() != null) {
+                launchPkg = intent.getComponent().getPackageName();
+            }
+            splash.putExtra(LauncherActivity.KEY_PKG, launchPkg);
             splash.putExtra(LauncherActivity.KEY_USER_ID, userId);
             BlackBoxCore.getContext().startActivity(splash);
-            Slog.d(TAG, "LauncherActivity.launch() called for package: " + intent.getPackage());
+            Slog.d(TAG, "LauncherActivity.launch() called for package: " + launchPkg);
         } catch (Exception e) {
             Slog.e(TAG, "Error in LauncherActivity.launch()", e);
         }
@@ -57,6 +61,13 @@ public class LauncherActivity extends Activity {
             Intent launchIntent = intent.getParcelableExtra(KEY_INTENT);
             String packageName = intent.getStringExtra(KEY_PKG);
             int userId = intent.getIntExtra(KEY_USER_ID, 0);
+
+            // Some launch intents are built with setClassName() only, which does not populate
+            // getPackage(). Recover the package from the explicit component as a fallback.
+            if (packageName == null && launchIntent != null
+                    && launchIntent.getComponent() != null) {
+                packageName = launchIntent.getComponent().getPackageName();
+            }
 
             if (launchIntent == null || packageName == null) {
                 Slog.w(TAG, "Missing launch intent or package name, finishing activity");

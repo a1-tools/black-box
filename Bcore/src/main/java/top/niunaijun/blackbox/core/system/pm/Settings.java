@@ -41,9 +41,13 @@ import top.niunaijun.blackbox.utils.compat.PackageParserCompat;
     }
 
     BPackageSettings getPackageLPw(String name, PackageParser.Package aPackage, InstallOption installOption) {
+        return getPackageLPw(name, new BPackage(aPackage), installOption);
+    }
+
+    BPackageSettings getPackageLPw(String name, BPackage bPackage, InstallOption installOption) {
         BPackageSettings pkgSettings;
         BPackageSettings origSettings = new BPackageSettings();
-        origSettings.pkg = new BPackage(aPackage);
+        origSettings.pkg = bPackage;
         origSettings.pkg.installOption = installOption;
         origSettings.installOption = installOption;
         origSettings.pkg.mExtras = origSettings;

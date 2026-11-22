@@ -698,7 +698,24 @@ public class BPackageManagerService extends IBPackageManagerService.Stub impleme
             if (option.isFlag(InstallOption.FLAG_SYSTEM)) {
                 aPackage.applicationInfo = BlackBoxCore.getPackageManager().getPackageInfo(aPackage.packageName, 0).applicationInfo;
             }
-            BPackageSettings bPackageSettings = mSettings.getPackageLPw(aPackage.packageName, aPackage, option);
+            BPackageSettings bPackageSettings;
+            if (top.niunaijun.blackbox.utils.compat.PackageParserFix.needsFix()) {
+                // The reflection-built Package has no components, so activities would be empty
+                // and no launch intent could ever be resolved. Rebuild BPackage from the public
+                // PackageInfo which does carry the full component list.
+                PackageInfo fullInfo = top.niunaijun.blackbox.utils.compat.PackageParserFix.parseApk(
+                        BlackBoxCore.getContext(), apkFile.getAbsolutePath());
+                if (fullInfo == null) {
+                    return result.installError("parse components error.");
+                }
+                if (option.isFlag(InstallOption.FLAG_SYSTEM)) {
+                    fullInfo.applicationInfo = aPackage.applicationInfo;
+                }
+                bPackageSettings = mSettings.getPackageLPw(fullInfo.packageName,
+                        BPackage.fromPackageInfo(fullInfo, aPackage.baseCodePath), option);
+            } else {
+                bPackageSettings = mSettings.getPackageLPw(aPackage.packageName, aPackage, option);
+            }
 
             
             BProcessManagerService.get().killPackageAsUser(aPackage.packageName, userId);

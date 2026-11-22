@@ -109,6 +109,13 @@ public class BPackageManager extends BlackManager<IBPackageManagerService> {
                     userId);
         }
         if (ris == null || ris.size() <= 0) {
+            // On API 33+ the component list is rebuilt from PackageInfo, which has no
+            // intent-filter data. Resolving by LAUNCHER category therefore returns nothing.
+            // Fall back to an explicit component from the installed activity list.
+            Intent explicit = createExplicitLaunchIntent(packageName, userId);
+            if (explicit != null) {
+                return explicit;
+            }
             return null;
         }
         // generateActivityInfo() returns null when checkUseInstalledOrHidden() rejects the
@@ -129,6 +136,58 @@ public class BPackageManager extends BlackManager<IBPackageManagerService> {
     }
     
     
+    /**
+     * Build an explicit launch intent from the activities registered in the virtual PM. Used when
+     * intent-filter based resolution is unavailable (API 33+ compat parse path).
+     */
+    private Intent createExplicitLaunchIntent(String packageName, int userId) {
+        try {
+            IBPackageManagerService service = getService();
+            if (service == null) {
+                return null;
+            }
+            PackageInfo info = service.getPackageInfo(packageName,
+                    android.content.pm.PackageManager.GET_ACTIVITIES, userId);
+            if (info == null || info.activities == null) {
+                return null;
+            }
+            String chosen = null;
+            // Prefer an exported activity that is not a tool/widget; otherwise take the first.
+            for (android.content.pm.ActivityInfo ai : info.activities) {
+                if (ai == null || ai.name == null) {
+                    continue;
+                }
+                if (ai.exported && chosen == null) {
+                    chosen = ai.name;
+                }
+                if (ai.name.toLowerCase().contains("main")
+                        || ai.name.toLowerCase().contains("launcher")) {
+                    chosen = ai.name;
+                    break;
+                }
+            }
+            if (chosen == null && info.activities.length > 0
+                    && info.activities[0] != null) {
+                chosen = info.activities[0].name;
+            }
+            if (chosen == null) {
+                return null;
+            }
+            Intent intent = new Intent(Intent.ACTION_MAIN);
+            intent.addCategory(Intent.CATEGORY_LAUNCHER);
+            intent.setClassName(packageName, chosen);
+            // LauncherActivity.launch() reads getPackage() to carry the package through the
+            // stub activity; setClassName() alone does not populate it.
+            intent.setPackage(packageName);
+            intent.setFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+            Log.d(TAG, "Explicit launch intent for " + packageName + ": " + chosen);
+            return intent;
+        } catch (Exception e) {
+            Log.w(TAG, "createExplicitLaunchIntent failed for " + packageName, e);
+            return null;
+        }
+    }
+
     private Intent createFallbackLaunchIntent(String packageName) {
         try {
             
