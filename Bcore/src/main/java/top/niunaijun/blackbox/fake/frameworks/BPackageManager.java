@@ -19,6 +19,7 @@ import java.util.List;
 
 import top.niunaijun.blackbox.BlackBoxCore;
 import top.niunaijun.blackbox.app.BActivityThread;
+import top.niunaijun.blackbox.core.env.BEnvironment;
 import top.niunaijun.blackbox.core.system.ServiceManager;
 import top.niunaijun.blackbox.core.system.pm.IBPackageManagerService;
 import top.niunaijun.blackbox.entity.pm.InstallOption;
@@ -116,7 +117,10 @@ public class BPackageManager extends BlackManager<IBPackageManagerService> {
             if (explicit != null) {
                 return explicit;
             }
-            return null;
+            // Virtual PM has no components at all and the host PM cannot see this package
+            // (APK installed only inside the virtual space). Read the launcher activity from
+            // the stored base.apk binary manifest — no PackageManager needed.
+            return createExplicitLaunchIntentFromApk(packageName);
         }
         // generateActivityInfo() returns null when checkUseInstalledOrHidden() rejects the
         // component for this user (not installed / hidden / blacklisted), leaving a ResolveInfo
@@ -238,7 +242,60 @@ public class BPackageManager extends BlackManager<IBPackageManagerService> {
         }
     }
 
+    /**
+     * Last-resort launcher resolution that does not use any PackageManager. Reads the binary
+     * AndroidManifest.xml of the APK stored in the virtual space and builds an explicit MAIN /
+     * LAUNCHER intent to the launcher activity. This is what makes a purely virtual APK (not
+     * visible to the host PM) launchable on containers where getPackageArchiveInfo() returns
+     * no components.
+     */
+    private Intent createExplicitLaunchIntentFromApk(String packageName) {
+        try {
+            File apk = BEnvironment.getBaseApkDir(packageName);
+            if (apk == null || !apk.isFile()) {
+                Log.w(TAG, "No virtual base.apk for " + packageName);
+                return null;
+            }
+            top.niunaijun.blackbox.utils.compat.PackageParserFix.ComponentResult result =
+                    top.niunaijun.blackbox.utils.compat.PackageParserFix.resolveComponents(
+                            BlackBoxCore.getContext(), packageName, apk.getAbsolutePath(), null);
+            String chosen = result.launcherActivity;
+            if (chosen == null && result.info != null && result.info.activities != null) {
+                for (android.content.pm.ActivityInfo ai : result.info.activities) {
+                    if (ai == null || ai.name == null) continue;
+                    if (ai.exported) {
+                        chosen = ai.name;
+                        break;
+                    }
+                    if (chosen == null) chosen = ai.name;
+                }
+            }
+            if (chosen == null) {
+                Log.w(TAG, "No launcher activity in virtual APK manifest for " + packageName
+                        + " (source=" + result.source + ")");
+                return null;
+            }
+            Intent intent = new Intent(Intent.ACTION_MAIN);
+            intent.addCategory(Intent.CATEGORY_LAUNCHER);
+            intent.setClassName(packageName, chosen);
+            intent.setPackage(packageName);
+            intent.setFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+            Log.d(TAG, "APK-derived explicit launch intent for " + packageName + ": " + chosen
+                    + " (source=" + result.source + ")");
+            return intent;
+        } catch (Throwable t) {
+            Log.w(TAG, "createExplicitLaunchIntentFromApk failed for " + packageName, t);
+            return null;
+        }
+    }
+
     private Intent createFallbackLaunchIntent(String packageName) {
+        // Prefer a real launcher activity from the virtual APK over a package-only MAIN intent,
+        // which the stub cannot route without a component.
+        Intent apkIntent = createExplicitLaunchIntentFromApk(packageName);
+        if (apkIntent != null) {
+            return apkIntent;
+        }
         try {
             
             Intent intent = BlackBoxCore.getContext().getPackageManager().getLaunchIntentForPackage(packageName);

@@ -15,7 +15,6 @@ import android.content.pm.ResolveInfo;
 import android.content.pm.ServiceInfo;
 import android.net.Uri;
 import android.os.Binder;
-import android.os.Build;
 import android.os.RemoteException;
 import android.text.TextUtils;
 
@@ -24,9 +23,11 @@ import java.io.InputStream;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Collections;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Set;
 import java.util.UUID;
 
 import top.niunaijun.blackbox.BlackBoxCore;
@@ -46,6 +47,7 @@ import top.niunaijun.blackbox.utils.AbiUtils;
 import top.niunaijun.blackbox.utils.FileUtils;
 import top.niunaijun.blackbox.utils.Slog;
 import top.niunaijun.blackbox.utils.compat.PackageParserCompat;
+import top.niunaijun.blackbox.utils.compat.PackageParserFix;
 
 
 import static android.content.pm.PackageManager.MATCH_DIRECT_BOOT_UNAWARE;
@@ -62,6 +64,8 @@ public class BPackageManagerService extends IBPackageManagerService.Stub impleme
 
     final Map<String, BPackageSettings> mPackages = mSettings.mPackages;
     final Object mInstallLock = new Object();
+    /** Packages whose component repair was already attempted this process (avoids re-parsing APKs). */
+    private final Set<String> mRepairAttempted = Collections.synchronizedSet(new HashSet<String>());
 
     public static BPackageManagerService get() {
         return sService;
@@ -449,6 +453,8 @@ public class BPackageManagerService extends IBPackageManagerService.Stub impleme
                 BPackageSettings bPackageSettings = mPackages.get(pkgName);
                 result = null;
                 if (bPackageSettings != null) {
+                    // Safety net for records whose repair could not run at systemReady().
+                    ensureComponents(bPackageSettings);
                     final BPackage pkg = bPackageSettings.pkg;
 
                     result = mComponentResolver.queryActivities(
@@ -704,45 +710,46 @@ public class BPackageManagerService extends IBPackageManagerService.Stub impleme
                 aPackage.applicationInfo = BlackBoxCore.getPackageManager().getPackageInfo(aPackage.packageName, 0).applicationInfo;
             }
             BPackageSettings bPackageSettings;
-            if (top.niunaijun.blackbox.utils.compat.PackageParserFix.needsFix()) {
+            if (PackageParserFix.needsFix()) {
                 // The reflection-built Package has no components, so activities would be empty
-                // and no launch intent could ever be resolved. Rebuild BPackage from the public
-                // PackageInfo which does carry the full component list.
-                PackageInfo fullInfo = top.niunaijun.blackbox.utils.compat.PackageParserFix.parseApk(
+                // and no launch intent could ever be resolved. Rebuild BPackage from a
+                // PackageInfo that actually carries a component tree.
+                PackageInfo fullInfo = PackageParserFix.parseApk(
                         BlackBoxCore.getContext(), apkFile.getAbsolutePath());
                 if (fullInfo == null) {
                     return result.installError("parse components error.");
                 }
-                // On some Android 16 / container builds getPackageArchiveInfo() returns a
-                // PackageInfo with no components (A/S/R/P all empty), which makes every
-                // launch fail with no_launch_intent. For clones of host-installed apps,
-                // read the already-parsed components from the host PM instead.
-                if (!top.niunaijun.blackbox.utils.compat.PackageParserFix.hasComponents(fullInfo)) {
-                    Slog.w(TAG, "archiveInfo has no components for " + fullInfo.packageName
-                            + " (SDK=" + Build.VERSION.SDK_INT + "), trying installed package info");
-                    PackageInfo installed = top.niunaijun.blackbox.utils.compat.PackageParserFix
-                            .getInstalledPackageInfo(BlackBoxCore.getContext(), fullInfo.packageName);
-                    if (installed != null
-                            && top.niunaijun.blackbox.utils.compat.PackageParserFix.hasComponents(installed)) {
-                        fullInfo.activities = installed.activities;
-                        fullInfo.services = installed.services;
-                        fullInfo.receivers = installed.receivers;
-                        fullInfo.providers = installed.providers;
-                        if (fullInfo.applicationInfo == null) {
-                            fullInfo.applicationInfo = installed.applicationInfo;
-                        }
-                        Slog.d(TAG, "Recovered components from installed package "
-                                + fullInfo.packageName);
+                PackageParserFix.ComponentResult recovered = null;
+                if (!PackageParserFix.hasComponents(fullInfo)) {
+                    // Android 16 / APK-container builds often return no components from
+                    // getPackageArchiveInfo(). Try host PM, then the raw AndroidManifest.xml —
+                    // the latter is the only source for an APK installed only in the virtual space.
+                    recovered = PackageParserFix.resolveComponents(BlackBoxCore.getContext(),
+                            fullInfo.packageName, apkFile.getAbsolutePath(), fullInfo.applicationInfo);
+                    if (recovered.ok()) {
+                        PackageParserFix.copyComponents(fullInfo, recovered.info);
+                        Slog.d(TAG, "Recovered components for " + fullInfo.packageName
+                                + " via " + recovered.source + " " + recovered.counts());
                     } else {
                         Slog.e(TAG, "Could not recover components for " + fullInfo.packageName
-                                + " - launch will likely fail with no_launch_intent");
+                                + " (source=" + recovered.source
+                                + ") - launch will likely fail with no_launch_intent");
                     }
                 }
                 if (option.isFlag(InstallOption.FLAG_SYSTEM)) {
                     fullInfo.applicationInfo = aPackage.applicationInfo;
                 }
-                bPackageSettings = mSettings.getPackageLPw(fullInfo.packageName,
-                        BPackage.fromPackageInfo(fullInfo, aPackage.baseCodePath), option);
+                BPackage newPkg = BPackage.fromPackageInfo(fullInfo, aPackage.baseCodePath);
+                if (recovered != null) {
+                    newPkg.attachIntentFilters(recovered.activityFilters);
+                }
+                bPackageSettings = mSettings.getPackageLPw(fullInfo.packageName, newPkg, option);
+                // getPackageLPw() regenerates applicationInfo; a container PM can return null.
+                // The component resolver dereferences processName, so never leave it null.
+                if (bPackageSettings.pkg.applicationInfo == null) {
+                    restoreApplicationInfo(bPackageSettings);
+                }
+                mRepairAttempted.remove(fullInfo.packageName);
             } else {
                 bPackageSettings = mSettings.getPackageLPw(aPackage.packageName, aPackage, option);
             }
@@ -933,38 +940,85 @@ public class BPackageManagerService extends IBPackageManagerService.Stub impleme
     }
 
     /**
-     * Idempotent self-heal for packages persisted with an empty component tree.
+     * Locate the APK backing a virtual package. A URI install moves the APK into
+     * {@code blackbox/data/app/<pkg>/base.apk}; a system clone keeps pointing at the host APK.
+     */
+    private String findApkPath(BPackageSettings ps) {
+        if (ps == null || ps.pkg == null) return null;
+        String path = ps.pkg.baseCodePath;
+        if (PackageParserFix.isReadableApk(path)) return path;
+        File baseApk = BEnvironment.getBaseApkDir(ps.pkg.packageName);
+        if (PackageParserFix.isReadableApk(baseApk.getAbsolutePath())) return baseApk.getAbsolutePath();
+        ApplicationInfo ai = ps.pkg.applicationInfo;
+        if (ai != null) {
+            if (PackageParserFix.isReadableApk(ai.sourceDir)) return ai.sourceDir;
+            if (PackageParserFix.isReadableApk(ai.publicSourceDir)) return ai.publicSourceDir;
+        }
+        return null;
+    }
+
+    /** Ensure the component resolver always has a non-null applicationInfo.processName to read. */
+    private void restoreApplicationInfo(BPackageSettings ps) {
+        if (ps == null || ps.pkg == null || ps.pkg.applicationInfo != null) return;
+        String apkPath = findApkPath(ps);
+        ApplicationInfo fallback = null;
+        if (PackageParserFix.isReadableApk(apkPath)) {
+            try {
+                PackageInfo archive = BlackBoxCore.getPackageManager()
+                        .getPackageArchiveInfo(apkPath, 0);
+                if (archive != null) fallback = archive.applicationInfo;
+            } catch (Throwable ignored) {
+            }
+        }
+        if (fallback == null) {
+            fallback = new ApplicationInfo();
+            fallback.packageName = ps.pkg.packageName;
+            fallback.sourceDir = apkPath;
+            fallback.publicSourceDir = apkPath;
+            fallback.processName = ps.pkg.packageName;
+        }
+        ps.pkg.applicationInfo = fallback;
+    }
+
+    /**
+     * Idempotent self-heal for packages persisted with an empty activity tree.
      *
-     * On Android 16 / APK-container builds getPackageArchiveInfo() returns no components, so a
-     * package cloned before the component-rebuild fix (or kept across an app upgrade that does
-     * not clear the virtual space) has no activities/services/receivers/providers and can never
-     * resolve a launcher. The host PackageManager still holds the fully parsed components, so
-     * rebuild them in place, persist the result, and refresh the component index.
+     * Runs on every framework start and whenever a package is queried. Old install records
+     * written before the component-recovery fix have no activities, so no launch intent can be
+     * resolved. Recovery no longer depends on the host PackageManager: for APKs installed only
+     * inside the virtual space the component tree is rebuilt by parsing the binary
+     * AndroidManifest.xml of the stored base.apk. The repaired record is persisted, so a user
+     * who only replaces the host APK (without re-cloning) is fixed automatically.
      */
     boolean ensureComponents(BPackageSettings ps) {
         if (ps == null || ps.pkg == null) return false;
-        if (hasComponents(ps.pkg)) return true;
+        restoreApplicationInfo(ps);
+        if (ps.pkg.activities != null && !ps.pkg.activities.isEmpty()) return true;
         String pkgName = ps.pkg.packageName;
         if (TextUtils.isEmpty(pkgName) || Objects.equals(pkgName, BlackBoxCore.getHostPkg())) {
             return false;
         }
+        synchronized (mRepairAttempted) {
+            if (mRepairAttempted.contains(pkgName)) return false;
+            mRepairAttempted.add(pkgName);
+        }
         try {
-            PackageInfo host = top.niunaijun.blackbox.utils.compat.PackageParserFix
-                    .getInstalledPackageInfo(BlackBoxCore.getContext(), pkgName);
-            if (host == null
-                    || !top.niunaijun.blackbox.utils.compat.PackageParserFix.hasComponents(host)) {
-                Slog.w(TAG, "ensureComponents: host has no components for " + pkgName);
+            String apkPath = findApkPath(ps);
+            PackageParserFix.ComponentResult recovered = PackageParserFix.resolveComponents(
+                    BlackBoxCore.getContext(), pkgName, apkPath, ps.pkg.applicationInfo);
+            if (!recovered.ok()) {
+                Slog.w(TAG, "ensureComponents: no component source for " + pkgName
+                        + " apk=" + apkPath + " source=" + recovered.source);
                 return false;
             }
-            if (!ps.pkg.addComponentsFromPackageInfo(host)) {
+            if (!ps.pkg.addComponentsFromPackageInfo(recovered.info, recovered.activityFilters)) {
                 return false;
             }
             ps.save();
             mComponentResolver.removeAllComponents(ps.pkg);
             mComponentResolver.addAllComponents(ps.pkg);
-            Slog.d(TAG, "ensureComponents: repaired " + pkgName
-                    + " A=" + ps.pkg.activities.size() + " S=" + ps.pkg.services.size()
-                    + " R=" + ps.pkg.receivers.size() + " P=" + ps.pkg.providers.size());
+            Slog.d(TAG, "ensureComponents: repaired " + pkgName + " via " + recovered.source
+                    + " " + recovered.counts() + " launcher=" + recovered.launcherActivity);
             return true;
         } catch (Throwable t) {
             Slog.e(TAG, "ensureComponents failed for " + pkgName + ": " + t);
@@ -978,12 +1032,14 @@ public class BPackageManagerService extends IBPackageManagerService.Stub impleme
         // Repair any legacy/empty-component package before rebuilding the index below. This runs
         // on every framework start, so a user who only replaces the APK (without re-cloning)
         // still gets the old install records fixed automatically.
-        for (BPackageSettings value : mPackages.values()) {
-            ensureComponents(value);
-        }
-        for (BPackageSettings value : mPackages.values()) {
-            mComponentResolver.removeAllComponents(value.pkg);
-            mComponentResolver.addAllComponents(value.pkg);
+        synchronized (mPackages) {
+            for (BPackageSettings value : mPackages.values()) {
+                ensureComponents(value);
+            }
+            for (BPackageSettings value : mPackages.values()) {
+                mComponentResolver.removeAllComponents(value.pkg);
+                mComponentResolver.addAllComponents(value.pkg);
+            }
         }
     }
 }

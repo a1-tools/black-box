@@ -19,6 +19,7 @@ import android.os.Parcel;
 import android.os.Parcelable;
 
 import java.util.ArrayList;
+import java.util.Map;
 
 import top.niunaijun.blackbox.entity.pm.InstallOption;
 import top.niunaijun.blackbox.utils.compat.BuildCompat;
@@ -81,28 +82,36 @@ public class BPackage implements Parcelable {
         if (pi.activities != null) {
             for (ActivityInfo info : pi.activities) {
                 if (info != null) {
-                    pkg.activities.add(new Activity(info));
+                    Activity a = new Activity(info);
+                    a.owner = pkg;
+                    pkg.activities.add(a);
                 }
             }
         }
         if (pi.receivers != null) {
             for (ActivityInfo info : pi.receivers) {
                 if (info != null) {
-                    pkg.receivers.add(new Activity(info));
+                    Activity a = new Activity(info);
+                    a.owner = pkg;
+                    pkg.receivers.add(a);
                 }
             }
         }
         if (pi.services != null) {
             for (ServiceInfo info : pi.services) {
                 if (info != null) {
-                    pkg.services.add(new Service(info));
+                    Service s = new Service(info);
+                    s.owner = pkg;
+                    pkg.services.add(s);
                 }
             }
         }
         if (pi.providers != null) {
             for (ProviderInfo info : pi.providers) {
                 if (info != null) {
-                    pkg.providers.add(new Provider(info));
+                    Provider p = new Provider(info);
+                    p.owner = pkg;
+                    pkg.providers.add(p);
                 }
             }
         }
@@ -180,6 +189,38 @@ public class BPackage implements Parcelable {
                 + " ok=" + ok + " A=" + activities.size() + " S=" + services.size()
                 + " R=" + receivers.size() + " P=" + providers.size());
         return ok;
+    }
+
+    /**
+     * Repair variant that also restores the MAIN/LAUNCHER intent filters. A public
+     * {@code PackageInfo} never carries intent filters, so when components had to be recovered
+     * from a raw AndroidManifest.xml we attach the filters we parsed ourselves; without them
+     * {@code queryIntentActivities(MAIN, LAUNCHER)} would still return nothing.
+     */
+    public boolean addComponentsFromPackageInfo(PackageInfo pi,
+                                                Map<String, IntentFilter> activityFilters) {
+        boolean ok = addComponentsFromPackageInfo(pi);
+        if (ok) {
+            attachIntentFilters(activityFilters);
+        }
+        return ok;
+    }
+
+    /** Attach parsed intent filters to activities by their fully qualified class name. */
+    public void attachIntentFilters(Map<String, IntentFilter> activityFilters) {
+        if (activityFilters == null || activityFilters.isEmpty()) return;
+        for (Activity a : activities) {
+            if (a == null) continue;
+            IntentFilter filter = a.className == null ? null : activityFilters.get(a.className);
+            if (filter == null && a.info != null && a.info.name != null) {
+                filter = activityFilters.get(a.info.name);
+            }
+            if (filter == null) continue;
+            ActivityIntentInfo info = new ActivityIntentInfo(filter);
+            info.activity = a;
+            if (a.intents == null) a.intents = new ArrayList<>(1);
+            a.intents.add(info);
+        }
     }
 
     public BPackage(PackageParser.Package aPackage) {
@@ -545,6 +586,11 @@ public class BPackage implements Parcelable {
         public ActivityIntentInfo(IntentInfo intentInfo) {
             super(intentInfo);
         }
+
+        /** Build an intent info directly from a filter parsed out of AndroidManifest.xml. */
+        public ActivityIntentInfo(IntentFilter filter) {
+            super(filter, false);
+        }
     }
 
     public static class ServiceIntentInfo extends IntentInfo {
@@ -642,6 +688,12 @@ public class BPackage implements Parcelable {
             this.icon = intentInfo.icon;
             this.logo = intentInfo.logo;
             this.banner = intentInfo.banner;
+        }
+
+        /** Build from a filter parsed out of AndroidManifest.xml (AXML recovery path). */
+        public IntentInfo(IntentFilter filter, boolean hasDefault) {
+            this.intentFilter = filter;
+            this.hasDefault = hasDefault;
         }
 
         @Override

@@ -78,6 +78,8 @@ import top.niunaijun.blackbox.utils.LogSender;
 @SuppressWarnings({"unchecked", "deprecation"})
 public class BlackBoxCore extends ClientConfiguration {
     public static final String TAG = "BlackBoxCore";
+    /** Bumped with every launch-fix build so an on-screen diagnostic identifies the installed APK. */
+    public static final String DIAG_BUILD = "bb-4.0.1-axml-heal";
 
     private static final BlackBoxCore sBlackBoxCore = new BlackBoxCore();
     private static Context sContext;
@@ -1170,6 +1172,7 @@ public class BlackBoxCore extends ClientConfiguration {
                 .append(" abis=").append(java.util.Arrays.toString(Build.SUPPORTED_ABIS))
                 .append(" is64bit=").append(is64Bit()).append("\n");
         sb.append("host: ").append(getHostPkg()).append("\n");
+        sb.append("build: ").append(DIAG_BUILD).append("\n");
         sb.append("framework: servicesAvailable=").append(isServicesAvailable())
                 .append(" allFilesAccess=").append(hasAllFilesAccess()).append("\n");
         try {
@@ -1207,6 +1210,7 @@ public class BlackBoxCore extends ClientConfiguration {
                 .append(" abis=").append(java.util.Arrays.toString(Build.SUPPORTED_ABIS))
                 .append(" is64bit=").append(is64Bit()).append("\n");
         sb.append("host: ").append(getHostPkg()).append("\n");
+        sb.append("build: ").append(DIAG_BUILD).append("\n");
         sb.append("framework: servicesAvailable=").append(isServicesAvailable())
                 .append(" allFilesAccess=").append(hasAllFilesAccess()).append("\n");
         try {
@@ -1234,6 +1238,24 @@ public class BlackBoxCore extends ClientConfiguration {
             }
         } catch (Throwable t) {
             sb.append("  hostPM: ERROR ").append(t).append("\n");
+        }
+        try {
+            String source = top.niunaijun.blackbox.utils.compat.PackageParserFix
+                    .getLastSource(packageName);
+            sb.append("  componentSource=").append(source == null ? "NONE" : source).append("\n");
+            java.io.File apk = top.niunaijun.blackbox.core.env.BEnvironment
+                    .getBaseApkDir(packageName);
+            boolean exists = apk != null && apk.isFile();
+            sb.append("  virtualApk=").append(apk == null ? "NULL" : apk.getAbsolutePath())
+                    .append(" exists=").append(exists)
+                    .append(" size=").append(exists ? apk.length() : 0).append("\n");
+            if (exists) {
+                sb.append("  manifest=").append(
+                        top.niunaijun.blackbox.utils.compat.PackageParserFix
+                                .getManifestSummary(apk.getAbsolutePath())).append("\n");
+            }
+        } catch (Throwable t) {
+            sb.append("  apkInfo: ERROR ").append(t).append("\n");
         }
         try {
             sb.append("  isInstalled=").append(isInstalled(packageName, userId)).append("\n");
