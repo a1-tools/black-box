@@ -39,11 +39,49 @@ public class PackageParserFix {
                 pi.applicationInfo.sourceDir = apkPath;
                 pi.applicationInfo.publicSourceDir = apkPath;
             }
+            if (pi != null) {
+                Log.d(TAG, "parseApk " + pi.packageName + " flags=" + getFullFlags()
+                        + " components: A=" + count(pi.activities)
+                        + " S=" + count(pi.services)
+                        + " R=" + count(pi.receivers)
+                        + " P=" + count(pi.providers));
+            }
             return pi;
         } catch (Exception e) {
             Log.e(TAG, "parseApk failed: " + e.getMessage());
             return null;
         }
+    }
+
+    /** Reads the components of a package already installed on the host. */
+    public static PackageInfo getInstalledPackageInfo(Context context, String packageName) {
+        if (packageName == null) return null;
+        try {
+            PackageInfo pi = context.getPackageManager()
+                    .getPackageInfo(packageName, getFullFlags());
+            if (pi != null) {
+                Log.d(TAG, "getInstalledPackageInfo " + packageName
+                        + " components: A=" + count(pi.activities)
+                        + " S=" + count(pi.services)
+                        + " R=" + count(pi.receivers)
+                        + " P=" + count(pi.providers));
+            }
+            return pi;
+        } catch (Exception e) {
+            Log.w(TAG, "getInstalledPackageInfo " + packageName + " failed: " + e.getMessage());
+            return null;
+        }
+    }
+
+    public static boolean hasComponents(PackageInfo pi) {
+        return pi != null && ((pi.activities != null && pi.activities.length > 0)
+                || (pi.services != null && pi.services.length > 0)
+                || (pi.receivers != null && pi.receivers.length > 0)
+                || (pi.providers != null && pi.providers.length > 0));
+    }
+
+    private static int count(Object[] arr) {
+        return arr == null ? 0 : arr.length;
     }
 
     @SuppressWarnings("deprecation")

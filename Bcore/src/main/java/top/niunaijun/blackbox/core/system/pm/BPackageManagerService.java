@@ -15,6 +15,7 @@ import android.content.pm.ResolveInfo;
 import android.content.pm.ServiceInfo;
 import android.net.Uri;
 import android.os.Binder;
+import android.os.Build;
 import android.os.RemoteException;
 import android.text.TextUtils;
 
@@ -707,6 +708,31 @@ public class BPackageManagerService extends IBPackageManagerService.Stub impleme
                         BlackBoxCore.getContext(), apkFile.getAbsolutePath());
                 if (fullInfo == null) {
                     return result.installError("parse components error.");
+                }
+                // On some Android 16 / container builds getPackageArchiveInfo() returns a
+                // PackageInfo with no components (A/S/R/P all empty), which makes every
+                // launch fail with no_launch_intent. For clones of host-installed apps,
+                // read the already-parsed components from the host PM instead.
+                if (!top.niunaijun.blackbox.utils.compat.PackageParserFix.hasComponents(fullInfo)) {
+                    Slog.w(TAG, "archiveInfo has no components for " + fullInfo.packageName
+                            + " (SDK=" + Build.VERSION.SDK_INT + "), trying installed package info");
+                    PackageInfo installed = top.niunaijun.blackbox.utils.compat.PackageParserFix
+                            .getInstalledPackageInfo(BlackBoxCore.getContext(), fullInfo.packageName);
+                    if (installed != null
+                            && top.niunaijun.blackbox.utils.compat.PackageParserFix.hasComponents(installed)) {
+                        fullInfo.activities = installed.activities;
+                        fullInfo.services = installed.services;
+                        fullInfo.receivers = installed.receivers;
+                        fullInfo.providers = installed.providers;
+                        if (fullInfo.applicationInfo == null) {
+                            fullInfo.applicationInfo = installed.applicationInfo;
+                        }
+                        Slog.d(TAG, "Recovered components from installed package "
+                                + fullInfo.packageName);
+                    } else {
+                        Slog.e(TAG, "Could not recover components for " + fullInfo.packageName
+                                + " - launch will likely fail with no_launch_intent");
+                    }
                 }
                 if (option.isFlag(InstallOption.FLAG_SYSTEM)) {
                     fullInfo.applicationInfo = aPackage.applicationInfo;

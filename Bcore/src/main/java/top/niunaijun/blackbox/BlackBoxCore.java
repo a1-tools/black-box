@@ -1221,6 +1221,21 @@ public class BlackBoxCore extends ClientConfiguration {
         }
         sb.append("target: ").append(packageName).append(" user=").append(userId).append("\n");
         try {
+            PackageInfo hostPi = top.niunaijun.blackbox.utils.compat.PackageParserFix
+                    .getInstalledPackageInfo(getContext(), packageName);
+            if (hostPi == null) {
+                sb.append("  hostPM: NULL (package not visible to host)\n");
+            } else {
+                sb.append("  hostPM: A=").append(hostPi.activities == null ? 0 : hostPi.activities.length)
+                        .append(" S=").append(hostPi.services == null ? 0 : hostPi.services.length)
+                        .append(" R=").append(hostPi.receivers == null ? 0 : hostPi.receivers.length)
+                        .append(" P=").append(hostPi.providers == null ? 0 : hostPi.providers.length)
+                        .append("\n");
+            }
+        } catch (Throwable t) {
+            sb.append("  hostPM: ERROR ").append(t).append("\n");
+        }
+        try {
             sb.append("  isInstalled=").append(isInstalled(packageName, userId)).append("\n");
             PackageInfo pi = getBPackageManager().getPackageInfo(packageName,
                     PackageManager.GET_ACTIVITIES | PackageManager.GET_SERVICES
