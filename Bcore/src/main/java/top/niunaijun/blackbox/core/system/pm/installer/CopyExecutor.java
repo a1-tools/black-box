@@ -1,6 +1,8 @@
 package top.niunaijun.blackbox.core.system.pm.installer;
 
 
+import android.text.TextUtils;
+
 import java.io.File;
 import java.io.IOException;
 
@@ -22,12 +24,27 @@ public class CopyExecutor implements Executor {
     private static String describe(Throwable t) {
         String message = t.getMessage();
         String text = t.getClass().getSimpleName() + (message == null ? "" : ": " + message);
-        return text.length() > 180 ? text.substring(0, 180) : text;
+        StackTraceElement[] stack = t.getStackTrace();
+        if (stack != null && stack.length > 0) {
+            StackTraceElement frame = stack[0];
+            text += " @" + frame.getClassName() + "." + frame.getMethodName()
+                    + (frame.getLineNumber() > 0 ? ":" + frame.getLineNumber() : "");
+        }
+        return text.length() > 220 ? text.substring(0, 220) : text;
     }
 
     @Override
     public int exec(BPackageSettings ps, InstallOption option, int userId) {
         lastError = null;
+        if (ps == null || ps.pkg == null) {
+            lastError = "Null package settings";
+            return -3;
+        }
+        if (TextUtils.isEmpty(ps.pkg.baseCodePath) || TextUtils.isEmpty(ps.pkg.packageName)) {
+            lastError = "Invalid package: baseCodePath=" + ps.pkg.baseCodePath
+                    + ", packageName=" + ps.pkg.packageName;
+            return -3;
+        }
         try {
             if (!option.isFlag(InstallOption.FLAG_SYSTEM)) {
                 try {

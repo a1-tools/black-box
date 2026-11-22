@@ -11,7 +11,9 @@ import java.io.FileOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
+import java.util.ArrayList;
 import java.util.Enumeration;
+import java.util.List;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipFile;
 import java.util.zip.ZipInputStream;
@@ -19,35 +21,33 @@ import java.util.zip.ZipInputStream;
 public class NativeUtils {
     public static final String TAG = "VirtualM";
 
-    private static boolean contains(String[] array, String value) {
-        if (array == null || value == null) return false;
-        for (String item : array) {
-            if (value.equals(item)) return true;
-        }
-        return false;
-    }
-
     /**
      * ABI names ordered by preference. Only the first ABI that actually contains a .so
      * is extracted: extracting several ABIs into the same flat directory would let a
      * 32-bit library overwrite the 64-bit one on a 64-bit device.
+     *
+     * Non-AOSP runtimes may report null or empty entries in SUPPORTED_ABIS, so the
+     * list is rebuilt defensively instead of relying on the platform array layout.
      */
     private static String[] wantedAbis() {
-        String[] supported = Build.SUPPORTED_ABIS;
-        int extra = 0;
-        if (!contains(supported, Build.CPU_ABI) && Build.CPU_ABI != null) extra++;
-        if (!contains(supported, "armeabi")) extra++;
+        List<String> result = new ArrayList<String>();
+        addAbi(result, Build.SUPPORTED_ABIS);
+        addAbi(result, Build.CPU_ABI);
+        addAbi(result, "armeabi");
+        return result.toArray(new String[0]);
+    }
 
-        String[] result = new String[(supported == null ? 0 : supported.length) + extra];
-        int i = 0;
-        if (supported != null) {
-            for (String abi : supported) {
-                if (abi != null) result[i++] = abi;
-            }
+    private static void addAbi(List<String> result, String[] abis) {
+        if (abis == null) return;
+        for (String abi : abis) addAbi(result, abi);
+    }
+
+    private static void addAbi(List<String> result, String abi) {
+        if (abi == null || abi.length() == 0) return;
+        for (String existing : result) {
+            if (existing.equals(abi)) return;
         }
-        if (Build.CPU_ABI != null && !contains(supported, Build.CPU_ABI)) result[i++] = Build.CPU_ABI;
-        if (!contains(supported, "armeabi")) result[i++] = "armeabi";
-        return result;
+        result.add(abi);
     }
 
     /**
@@ -58,6 +58,9 @@ public class NativeUtils {
      * read. Try ZipFile first for speed, then fall back to ZipInputStream.
      */
     public static void copyNativeLib(File apk, File nativeLibDir) throws Exception {
+        if (apk == null || nativeLibDir == null) {
+            throw new IOException("Null apk or native lib dir: apk=" + apk + ", libDir=" + nativeLibDir);
+        }
         long startTime = System.currentTimeMillis();
 
         if (!nativeLibDir.exists() && !nativeLibDir.mkdirs()) {
@@ -71,6 +74,11 @@ public class NativeUtils {
         }
 
         String[] abis = wantedAbis();
+        if (abis.length == 0) {
+            throw new IOException("No supported ABI reported: SUPPORTED_ABIS="
+                    + java.util.Arrays.toString(Build.SUPPORTED_ABIS)
+                    + ", CPU_ABI=" + Build.CPU_ABI);
+        }
         Log.d(TAG, "copyNativeLib apk=" + apk.getAbsolutePath()
                 + ", size=" + apk.length() + ", libDir=" + nativeLibDir
                 + ", abis=" + java.util.Arrays.toString(abis));
@@ -102,6 +110,7 @@ public class NativeUtils {
     private static void copyFromStream(File apk, String[] abis, File nativeLibDir)
             throws IOException {
         for (String abi : abis) {
+            if (abi == null || abi.length() == 0) continue;
             boolean found;
             try (ZipInputStream zis = new ZipInputStream(
                     new BufferedInputStream(new FileInputStream(apk)))) {
@@ -120,18 +129,27 @@ public class NativeUtils {
         ZipEntry entry;
         while ((entry = zis.getNextEntry()) != null) {
             String name = entry.getName();
-            if (!name.startsWith("lib/") || !name.endsWith(".so")) {
+            if (name == null || !name.startsWith("lib/") || !name.endsWith(".so")) {
                 zis.closeEntry();
                 continue;
             }
-            String entryAbi = name.substring(4, name.lastIndexOf('/'));
-            if (!abi.equals(entryAbi)) {
+            int slash = name.lastIndexOf('/');
+            if (slash <= 4) {
                 zis.closeEntry();
                 continue;
             }
-            String libName = name.substring(name.lastIndexOf('/') + 1);
+            String entryAbi = name.substring(4, slash);
+            if (!entryAbi.equals(abi)) {
+                zis.closeEntry();
+                continue;
+            }
+            String libName = name.substring(slash + 1);
+            if (libName.length() == 0) {
+                zis.closeEntry();
+                continue;
+            }
             Log.d(TAG, "Found so via stream: " + name);
-            writeLib(nativeLibDir, libName, entry.getSize(), zis);
+            writeLib(nativeLibDir, libName, zis);
             found = true;
             zis.closeEntry();
         }
@@ -140,6 +158,7 @@ public class NativeUtils {
 
     private static boolean findAndCopyNativeLib(ZipFile zipfile, String cpuArch, File nativeLibDir)
             throws Exception {
+        if (cpuArch == null || cpuArch.length() == 0) return false;
         Log.d(TAG, "Try to copy plugin's cup arch: " + cpuArch);
         boolean findLib = false;
         boolean findSo = false;
@@ -149,6 +168,7 @@ public class NativeUtils {
         while (e.hasMoreElements()) {
             ZipEntry entry = e.nextElement();
             String entryName = entry.getName();
+            if (entryName == null) continue;
             if (!findLib && !entryName.startsWith("lib/")) {
                 continue;
             }
@@ -163,9 +183,15 @@ public class NativeUtils {
             }
 
             String libName = entryName.substring(entryName.lastIndexOf('/') + 1);
+            if (libName.length() == 0) continue;
             Log.d(TAG, "verify so " + libName);
-            try (InputStream in = zipfile.getInputStream(entry)) {
-                writeLib(nativeLibDir, libName, entry.getSize(), in);
+            InputStream in = zipfile.getInputStream(entry);
+            if (in == null) {
+                Log.w(TAG, "Null stream for " + entryName);
+                continue;
+            }
+            try (InputStream stream = in) {
+                writeLib(nativeLibDir, libName, stream);
             }
         }
 
@@ -176,8 +202,11 @@ public class NativeUtils {
         return findSo;
     }
 
-    private static void writeLib(File nativeLibDir, String libName, long expectedSize, InputStream in)
+    private static void writeLib(File nativeLibDir, String libName, InputStream in)
             throws IOException {
+        if (libName == null || libName.length() == 0 || in == null) {
+            throw new IOException("Invalid so entry: name=" + libName + ", stream=" + in);
+        }
         File libFile = new File(nativeLibDir, libName);
         // The destination is rebuilt on every install, so an existing file means it was
         // already written from a preferred ABI. Never overwrite it with another ABI.
