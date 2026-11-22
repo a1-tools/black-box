@@ -84,18 +84,27 @@ class AppsRepository {
                 val installedApplications: List<ApplicationInfo> =
                         BlackBoxCore.getPackageManager().getInstalledApplications(0)
                 val installedList = mutableListOf<AppInfo>()
+                var skippedSystem = 0
+                var skippedAbi = 0
+                var skippedSelf = 0
+                Log.d(TAG, "previewInstallList: host apps=${installedApplications.size}, 64bit=${BlackBoxCore.is64Bit()}")
 
                 for (installedApplication in installedApplications) {
                     try {
                         val file = File(installedApplication.sourceDir)
 
-                        if ((installedApplication.flags and ApplicationInfo.FLAG_SYSTEM) != 0)
-                                continue
+                        if ((installedApplication.flags and ApplicationInfo.FLAG_SYSTEM) != 0) {
+                            skippedSystem++
+                            continue
+                        }
 
-                        if (!AbiUtils.isSupport(file)) continue
+                        if (!AbiUtils.isSupport(file)) {
+                            skippedAbi++
+                            continue
+                        }
 
-                        
                         if (BlackBoxCore.get().isBlackBoxApp(installedApplication.packageName)) {
+                            skippedSelf++
                             Log.d(
                                     TAG,
                                     "Filtering out BlackBox app: ${installedApplication.packageName}"
@@ -125,6 +134,7 @@ class AppsRepository {
                 }
                 this.mInstalledList.clear()
                 this.mInstalledList.addAll(installedList)
+                Log.d(TAG, "previewInstallList: result=${installedList.size}, skippedSystem=$skippedSystem, skippedAbi=$skippedAbi, skippedSelf=$skippedSelf")
             }
         } catch (e: Exception) {
             Log.e(TAG, "Error in previewInstallList: ${e.message}")

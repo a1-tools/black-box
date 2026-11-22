@@ -70,7 +70,7 @@ class ListActivity : BaseActivity() {
                 ViewModelProvider(this, InjectionUtil.getListFactory())
                         .get(ListViewModel::class.java)
         val userID = intent.getIntExtra("userID", 0)
-        viewModel.getInstallAppList(userID)
+        viewModel.refreshInstallableApps(userID)
         viewBinding.toolbarLayout.toolbar.setTitle(R.string.installed_app)
 
         viewModel.loadingLiveData.observe(this) {
@@ -88,7 +88,6 @@ class ListActivity : BaseActivity() {
                 filterApp("")
                 if (it.isNotEmpty()) {
                     viewBinding.stateView.visibility = android.view.View.GONE
-                    viewModel.previewInstalledList()
                 } else {
                     viewBinding.stateView.visibility = android.view.View.VISIBLE
                 }
