@@ -19,16 +19,31 @@ import java.util.zip.ZipFile;
 public class NativeUtils {
     public static final String TAG = "VirtualM";
 
+    private static boolean contains(String[] array, String value) {
+        if (array == null || value == null) return false;
+        for (String item : array) {
+            if (value.equals(item)) return true;
+        }
+        return false;
+    }
+
     public static void copyNativeLib(File apk, File nativeLibDir) throws Exception {
         long startTime = System.currentTimeMillis();
         if (!nativeLibDir.exists()) {
             nativeLibDir.mkdirs();
         }
         try (ZipFile zipfile = new ZipFile(apk.getAbsolutePath())) {
-            if (findAndCopyNativeLib(zipfile, Build.CPU_ABI, nativeLibDir)) {
-                return;
+            // 兼容容器环境下 Build.CPU_ABI 可能为空或与实际支持列表不一致，
+            // 按 SUPPORTED_ABIS 依次复制，避免只认第一个 ABI 导致 so 缺失。
+            String[] supportedAbis = Build.SUPPORTED_ABIS;
+            if (supportedAbis != null) {
+                for (String abi : supportedAbis) {
+                    findAndCopyNativeLib(zipfile, abi, nativeLibDir);
+                }
             }
-
+            if (Build.CPU_ABI != null && !contains(supportedAbis, Build.CPU_ABI)) {
+                findAndCopyNativeLib(zipfile, Build.CPU_ABI, nativeLibDir);
+            }
             findAndCopyNativeLib(zipfile, "armeabi", nativeLibDir);
         } finally {
             Log.d(TAG, "Done! +" + (System.currentTimeMillis() - startTime) + "ms");

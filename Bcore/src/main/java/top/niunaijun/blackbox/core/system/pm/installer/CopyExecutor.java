@@ -17,7 +17,12 @@ public class CopyExecutor implements Executor {
     public int exec(BPackageSettings ps, InstallOption option, int userId) {
         try {
             if (!option.isFlag(InstallOption.FLAG_SYSTEM)) {
-                NativeUtils.copyNativeLib(new File(ps.pkg.baseCodePath), BEnvironment.getAppLibDir(ps.pkg.packageName));
+                try {
+                    NativeUtils.copyNativeLib(new File(ps.pkg.baseCodePath), BEnvironment.getAppLibDir(ps.pkg.packageName));
+                } catch (Exception e) {
+                    e.printStackTrace();
+                    return -3;
+                }
             }
         } catch (Exception e) {
             e.printStackTrace();
@@ -41,7 +46,7 @@ public class CopyExecutor implements Executor {
                 ps.pkg.baseCodePath = newFile.getAbsolutePath();
             } catch (IOException e) {
                 e.printStackTrace();
-                return -1;
+                return -4;
             }
         } else if (option.isFlag(InstallOption.FLAG_SYSTEM)) {
             

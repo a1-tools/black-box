@@ -704,7 +704,20 @@ public class BPackageManagerService extends IBPackageManagerService.Stub impleme
 
             int i = BPackageInstallerService.get().installPackageAsUser(bPackageSettings, userId);
             if (i < 0) {
-                return result.installError("install apk error.");
+                String detail;
+                switch (i) {
+                    case -3:
+                        detail = "failed to copy native libraries";
+                        break;
+                    case -4:
+                        detail = "failed to copy apk file";
+                        break;
+                    default:
+                        detail = "installer step failed (" + i + ")";
+                        break;
+                }
+                Slog.e(TAG, "installPackageAsUser failed: code=" + i + ", apk=" + apkFile.getAbsolutePath());
+                return result.installError("install apk error: " + detail);
             }
             synchronized (mPackages) {
                 bPackageSettings.setInstalled(true, userId);
