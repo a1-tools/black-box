@@ -127,6 +127,8 @@ public class BlackBoxCore extends ClientConfiguration {
     
     private int mCurrentAppUid = -1;
     private String mCurrentAppPackage = null;
+    /** Last launch failure reason, kept in memory so the UI can show it without logcat. */
+    private volatile String mLastLaunchError = null;
     private boolean mIsSandboxedEnvironment = false;
 
     public static BlackBoxCore get() {
@@ -1104,30 +1106,152 @@ public class BlackBoxCore extends ClientConfiguration {
 
     public boolean launchApk(String packageName, int userId) {
         onBeforeMainLaunchApk(packageName, userId);
-        
-        
+        mLastLaunchError = null;
+
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
             if (!hasAllFilesAccess()) {
                 Slog.w(TAG, "All files access not granted for launching: " + packageName);
-                
+
                 for (AppLifecycleCallback callback : mAppLifecycleCallbacks) {
                     if (callback.onStoragePermissionNeeded(packageName, userId)) {
-                        
+                        mLastLaunchError = "no_all_files_access"
+                                + " (SDK=" + Build.VERSION.SDK_INT + ")";
                         Slog.d(TAG, "Launch cancelled - host app handling permission request");
                         return false;
                     }
                 }
-                
+
                 Slog.w(TAG, "Launching without all files access - some file operations may fail");
             }
         }
 
-        Intent launchIntentForPackage = getBPackageManager().getLaunchIntentForPackage(packageName, userId);
-        if (launchIntentForPackage == null) {
+        if (!isInstalled(packageName, userId)) {
+            mLastLaunchError = "not_installed_for_user"
+                    + " (pkg=" + packageName + ", user=" + userId + ")";
             return false;
         }
-        startActivity(launchIntentForPackage, userId);
+
+        Intent launchIntentForPackage;
+        try {
+            launchIntentForPackage = getBPackageManager().getLaunchIntentForPackage(packageName, userId);
+        } catch (Throwable t) {
+            mLastLaunchError = "resolve_intent_exception: " + t;
+            Slog.e(TAG, "getLaunchIntentForPackage threw", t);
+            return false;
+        }
+        if (launchIntentForPackage == null) {
+            mLastLaunchError = "no_launch_intent"
+                    + " (pkg=" + packageName + ", user=" + userId + ")";
+            return false;
+        }
+        try {
+            startActivity(launchIntentForPackage, userId);
+        } catch (Throwable t) {
+            mLastLaunchError = "start_activity_exception: " + t;
+            Slog.e(TAG, "startActivity threw", t);
+            return false;
+        }
         return true;
+    }
+
+    /** Returns the reason the most recent launchApk() failed, or null if it succeeded. */
+    public String getLastLaunchError() {
+        return mLastLaunchError;
+    }
+
+    /**
+     * Environment-only diagnostics, no specific package required.
+     */
+    public String getEnvironmentReport() {
+        StringBuilder sb = new StringBuilder();
+        sb.append("=== Virtual Framework Environment ===\n");
+        sb.append("device: SDK=").append(Build.VERSION.SDK_INT)
+                .append(" abi=").append(Build.CPU_ABI)
+                .append(" abis=").append(java.util.Arrays.toString(Build.SUPPORTED_ABIS))
+                .append(" is64bit=").append(is64Bit()).append("\n");
+        sb.append("host: ").append(getHostPkg()).append("\n");
+        sb.append("framework: servicesAvailable=").append(isServicesAvailable())
+                .append(" allFilesAccess=").append(hasAllFilesAccess()).append("\n");
+        try {
+            List<BUserInfo> users = getUsers();
+            sb.append("users: count=").append(users == null ? 0 : users.size());
+            if (users != null) {
+                for (BUserInfo u : users) sb.append(" [id=").append(u.id).append("]");
+            }
+            sb.append("\n");
+        } catch (Throwable t) {
+            sb.append("users: ERROR ").append(t).append("\n");
+        }
+        sb.append("hostInstalledApps: ").append(listHostAppCount()).append("\n");
+        return sb.toString();
+    }
+
+    private int listHostAppCount() {
+        try {
+            return getPackageManager().getInstalledApplications(0).size();
+        } catch (Throwable t) {
+            return -1;
+        }
+    }
+
+    /**
+     * Builds a self-contained diagnostic report that can be displayed on screen.
+     * Intended for restricted environments (e.g. APK containers on HarmonyOS) where
+     * logcat is unavailable, so the user can screenshot it.
+     */
+    public String getDiagnosticReport(String packageName, int userId) {
+        StringBuilder sb = new StringBuilder();
+        sb.append("=== Virtual Framework Diagnostics ===\n");
+        sb.append("device: SDK=").append(Build.VERSION.SDK_INT)
+                .append(" abi=").append(Build.CPU_ABI)
+                .append(" abis=").append(java.util.Arrays.toString(Build.SUPPORTED_ABIS))
+                .append(" is64bit=").append(is64Bit()).append("\n");
+        sb.append("host: ").append(getHostPkg()).append("\n");
+        sb.append("framework: servicesAvailable=").append(isServicesAvailable())
+                .append(" allFilesAccess=").append(hasAllFilesAccess()).append("\n");
+        try {
+            List<BUserInfo> users = getUsers();
+            sb.append("users: count=").append(users == null ? 0 : users.size());
+            if (users != null) {
+                for (BUserInfo u : users) sb.append(" [id=").append(u.id).append("]");
+            }
+            sb.append("\n");
+        } catch (Throwable t) {
+            sb.append("users: ERROR ").append(t).append("\n");
+        }
+        sb.append("target: ").append(packageName).append(" user=").append(userId).append("\n");
+        try {
+            sb.append("  isInstalled=").append(isInstalled(packageName, userId)).append("\n");
+            PackageInfo pi = getBPackageManager().getPackageInfo(packageName,
+                    PackageManager.GET_ACTIVITIES | PackageManager.GET_SERVICES
+                            | PackageManager.GET_RECEIVERS | PackageManager.GET_PROVIDERS,
+                    userId);
+            if (pi == null) {
+                sb.append("  packageInfo=NULL\n");
+            } else {
+                sb.append("  activities=").append(pi.activities == null ? 0 : pi.activities.length)
+                        .append(" services=").append(pi.services == null ? 0 : pi.services.length)
+                        .append(" receivers=").append(pi.receivers == null ? 0 : pi.receivers.length)
+                        .append(" providers=").append(pi.providers == null ? 0 : pi.providers.length)
+                        .append("\n");
+                if (pi.activities != null) {
+                    for (int i = 0; i < pi.activities.length && i < 8; i++) {
+                        sb.append("    A").append(i).append("=").append(pi.activities[i].name)
+                                .append(" exported=").append(pi.activities[i].exported).append("\n");
+                    }
+                }
+            }
+        } catch (Throwable t) {
+            sb.append("  packageInfo: ERROR ").append(t).append("\n");
+        }
+        try {
+            Intent li = getBPackageManager().getLaunchIntentForPackage(packageName, userId);
+            sb.append("  launchIntent=").append(li == null ? "NULL" : li.toString()).append("\n");
+        } catch (Throwable t) {
+            sb.append("  launchIntent: ERROR ").append(t).append("\n");
+        }
+        sb.append("lastLaunchError=").append(String.valueOf(mLastLaunchError)).append("\n");
+        return sb.toString();
     }
     public boolean isInstalled(String packageName, int userId) {
         return getBPackageManager().isInstalled(packageName, userId);

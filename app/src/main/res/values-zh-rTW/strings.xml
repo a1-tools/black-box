@@ -17,6 +17,7 @@
     <string name="close_fake_location_success">成功禁用%s的虛擬定位</string>
     <string name="setting">軟件設定</string>
     <string name="check_update">檢查更新</string>
+    <string name="diagnostics">診斷報告 / 環境資訊</string>
     <string name="jump_module">轉到模塊管理器</string>
     <string name="module_setting">模塊管理器</string>
     <string name="enable_xposed">啟用Xposed框架</string>

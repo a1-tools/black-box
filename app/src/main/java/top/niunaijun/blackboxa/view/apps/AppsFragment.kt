@@ -17,6 +17,7 @@ import androidx.recyclerview.widget.ItemTouchHelper
 import androidx.recyclerview.widget.RecyclerView
 import cbfg.rvadapter.RVAdapter
 import com.afollestad.materialdialogs.MaterialDialog
+import com.afollestad.materialdialogs.customview.customView
 import top.niunaijun.blackbox.BlackBoxCore
 import top.niunaijun.blackboxa.R
 import top.niunaijun.blackboxa.bean.AppInfo
@@ -422,6 +423,18 @@ class AppsFragment : Fragment() {
                 }
             }
 
+            viewModel.launchErrorLiveData.observe(viewLifecycleOwner) { report ->
+                try {
+                    if (!report.isNullOrEmpty()) {
+                        hideLoading()
+                        showDiagnosticDialog(report)
+                        viewModel.launchErrorLiveData.value = null
+                    }
+                } catch (e: Exception) {
+                    Log.e(TAG, "Error observing launch error data: ${e.message}")
+                }
+            }
+
             viewModel.updateSortLiveData.observe(viewLifecycleOwner) {
                 try {
                     if (this::mAdapter.isInitialized) {
@@ -441,8 +454,35 @@ class AppsFragment : Fragment() {
             super.onStop()
             viewModel.resultLiveData.value = null
             viewModel.launchLiveData.value = null
+            viewModel.launchErrorLiveData.value = null
         } catch (e: Exception) {
             Log.e(TAG, "Error in onStop: ${e.message}")
+        }
+    }
+
+    /**
+     * Shows launch-failure diagnostics on screen so the user can screenshot it in
+     * environments where logcat is unavailable (e.g. APK containers on HarmonyOS).
+     */
+    private fun showDiagnosticDialog(report: String) {
+        try {
+            val scrollView = android.widget.ScrollView(requireContext()).apply {
+                val tv = android.widget.TextView(requireContext()).apply {
+                    text = report
+                    textSize = 12f
+                    setTextIsSelectable(true)
+                    setTextColor(android.graphics.Color.parseColor("#FFDDDDDD"))
+                    typeface = android.graphics.Typeface.MONOSPACE
+                }
+                addView(tv)
+            }
+            MaterialDialog(requireContext()).show {
+                title(text = "启动诊断 / Launch diagnostics")
+                customView(view = scrollView, scrollable = true)
+                positiveButton(android.R.string.ok)
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Error showing diagnostic dialog: ${e.message}")
         }
     }
 

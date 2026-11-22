@@ -434,12 +434,27 @@ class AppsRepository {
         }
     }
 
-    fun launchApk(packageName: String, userId: Int, launchLiveData: MutableLiveData<Boolean>) {
+    fun launchApk(
+        packageName: String,
+        userId: Int,
+        launchLiveData: MutableLiveData<Boolean>,
+        launchErrorLiveData: MutableLiveData<String>
+    ) {
         try {
             val result = BlackBoxCore.get().launchApk(packageName, userId)
+            if (!result) {
+                val reason = BlackBoxCore.get().lastLaunchError
+                val report = try {
+                    BlackBoxCore.get().getDiagnosticReport(packageName, userId)
+                } catch (t: Throwable) {
+                    "diagnostic report error: $t"
+                }
+                launchErrorLiveData.postValue("reason=$reason\n\n$report")
+            }
             launchLiveData.postValue(result)
         } catch (e: Exception) {
             Log.e(TAG, "Error launching APK: ${e.message}")
+            launchErrorLiveData.postValue("exception: $e\n${Log.getStackTraceString(e)}")
             launchLiveData.postValue(false)
         }
     }

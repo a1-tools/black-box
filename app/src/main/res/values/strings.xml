@@ -18,6 +18,7 @@
     <string name="close_fake_location_success">Disable FakeLocation for %s Successfully</string>
     <string name="setting">Setting</string>
     <string name="check_update">Check for Updates</string>
+    <string name="diagnostics">Diagnostics / Environment Report</string>
     <string name="jump_module">Go to Module Manager</string>
     <string name="module_setting">Module Manager</string>
     <string name="enable_xposed">Enable Xposed Framework</string>

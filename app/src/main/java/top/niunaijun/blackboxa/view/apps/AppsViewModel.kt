@@ -15,6 +15,8 @@ class AppsViewModel(private val repo: AppsRepository) : BaseViewModel() {
 
     val launchLiveData = MutableLiveData<Boolean>()
 
+    val launchErrorLiveData = MutableLiveData<String>()
+
     
     val updateSortLiveData = MutableLiveData<Boolean>()
 
@@ -69,7 +71,7 @@ class AppsViewModel(private val repo: AppsRepository) : BaseViewModel() {
 
     fun launchApk(packageName: String, userID: Int) {
         launchOnUI {
-            repo.launchApk(packageName, userID, launchLiveData)
+            repo.launchApk(packageName, userID, launchLiveData, launchErrorLiveData)
         }
     }
 

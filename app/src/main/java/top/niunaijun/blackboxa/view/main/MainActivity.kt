@@ -12,6 +12,7 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.core.content.edit
 import androidx.viewpager2.widget.ViewPager2
 import com.afollestad.materialdialogs.MaterialDialog
+import com.afollestad.materialdialogs.customview.customView
 import com.afollestad.materialdialogs.input.input
 import top.niunaijun.blackbox.BlackBoxCore
 import top.niunaijun.blackboxa.R
@@ -432,6 +433,9 @@ class MainActivity : LoadingActivity() {
                 R.id.main_check_update -> {
                     UpdateManager.check(this, manual = true)
                 }
+                R.id.main_diagnostics -> {
+                    showDiagnostics()
+                }
                 R.id.main_git -> {
                     val intent =
                             Intent(
@@ -459,6 +463,45 @@ class MainActivity : LoadingActivity() {
         } catch (e: Exception) {
             Log.e(TAG, "Error handling menu item selection: ${e.message}")
             return false
+        }
+    }
+
+    private fun showDiagnostics() {
+        try {
+            val core = BlackBoxCore.get()
+            val sb = StringBuilder()
+            sb.append(core.environmentReport)
+            sb.append("\n--- installed virtual apps (user 0) ---\n")
+            try {
+                val packages = core.getInstalledPackages(0, 0)
+                if (packages.isNullOrEmpty()) {
+                    sb.append("(none)\n")
+                } else {
+                    for (p in packages) {
+                        sb.append(p.packageName).append("\n")
+                    }
+                }
+            } catch (t: Throwable) {
+                sb.append("list error: ").append(t).append("\n")
+            }
+            sb.append("\nlastLaunchError=").append(core.lastLaunchError).append("\n")
+
+            val scrollView = android.widget.ScrollView(this).apply {
+                addView(android.widget.TextView(this@MainActivity).apply {
+                    text = sb.toString()
+                    textSize = 12f
+                    setTextIsSelectable(true)
+                    setTextColor(android.graphics.Color.parseColor("#FFDDDDDD"))
+                    typeface = android.graphics.Typeface.MONOSPACE
+                })
+            }
+            MaterialDialog(this).show {
+                title(text = getString(R.string.diagnostics))
+                customView(view = scrollView, scrollable = true)
+                positiveButton(android.R.string.ok)
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "showDiagnostics error: ${e.message}")
         }
     }
 }

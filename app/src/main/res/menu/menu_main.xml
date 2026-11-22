@@ -9,6 +9,11 @@
             app:showAsAction="never" />
 
     <item
+            android:id="@+id/main_diagnostics"
+            android:title="@string/diagnostics"
+            app:showAsAction="never" />
+
+    <item
             android:id="@+id/main_setting"
             android:title="@string/setting"
             app:showAsAction="never" />
