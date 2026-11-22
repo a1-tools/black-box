@@ -34,6 +34,7 @@ import top.niunaijun.blackbox.core.env.BEnvironment;
 import top.niunaijun.blackbox.core.system.BProcessManagerService;
 import top.niunaijun.blackbox.core.system.ISystemService;
 import top.niunaijun.blackbox.core.system.ProcessRecord;
+import top.niunaijun.blackbox.core.system.pm.installer.CopyExecutor;
 import top.niunaijun.blackbox.core.system.user.BUserHandle;
 import top.niunaijun.blackbox.core.system.user.BUserInfo;
 import top.niunaijun.blackbox.core.system.user.BUserManagerService;
@@ -702,6 +703,7 @@ public class BPackageManagerService extends IBPackageManagerService.Stub impleme
             
             BProcessManagerService.get().killPackageAsUser(aPackage.packageName, userId);
 
+            CopyExecutor.lastError = null;
             int i = BPackageInstallerService.get().installPackageAsUser(bPackageSettings, userId);
             if (i < 0) {
                 String detail;
@@ -715,6 +717,9 @@ public class BPackageManagerService extends IBPackageManagerService.Stub impleme
                     default:
                         detail = "installer step failed (" + i + ")";
                         break;
+                }
+                if (!TextUtils.isEmpty(CopyExecutor.lastError)) {
+                    detail += " [" + CopyExecutor.lastError + "]";
                 }
                 Slog.e(TAG, "installPackageAsUser failed: code=" + i + ", apk=" + apkFile.getAbsolutePath());
                 return result.installError("install apk error: " + detail);

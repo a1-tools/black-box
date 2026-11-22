@@ -9,27 +9,44 @@ import top.niunaijun.blackbox.core.system.pm.BPackageSettings;
 import top.niunaijun.blackbox.entity.pm.InstallOption;
 import top.niunaijun.blackbox.utils.FileUtils;
 import top.niunaijun.blackbox.utils.NativeUtils;
+import top.niunaijun.blackbox.utils.Slog;
 
 
 public class CopyExecutor implements Executor {
 
+    public static final String TAG = "CopyExecutor";
+
+    /** Short reason of the last failure, propagated to the install toast for diagnosis. */
+    public static volatile String lastError;
+
+    private static String describe(Throwable t) {
+        String message = t.getMessage();
+        String text = t.getClass().getSimpleName() + (message == null ? "" : ": " + message);
+        return text.length() > 180 ? text.substring(0, 180) : text;
+    }
+
     @Override
     public int exec(BPackageSettings ps, InstallOption option, int userId) {
+        lastError = null;
         try {
             if (!option.isFlag(InstallOption.FLAG_SYSTEM)) {
                 try {
-                    NativeUtils.copyNativeLib(new File(ps.pkg.baseCodePath), BEnvironment.getAppLibDir(ps.pkg.packageName));
+                    NativeUtils.copyNativeLib(new File(ps.pkg.baseCodePath),
+                            BEnvironment.getAppLibDir(ps.pkg.packageName));
                 } catch (Exception e) {
-                    e.printStackTrace();
+                    lastError = describe(e);
+                    Slog.e(TAG, "copyNativeLib failed: apk=" + ps.pkg.baseCodePath
+                            + ", libDir=" + BEnvironment.getAppLibDir(ps.pkg.packageName), e);
                     return -3;
                 }
             }
         } catch (Exception e) {
-            e.printStackTrace();
+            lastError = describe(e);
+            Slog.e(TAG, "copy step failed", e);
             return -1;
         }
         if (option.isFlag(InstallOption.FLAG_STORAGE)) {
-            
+
             File origFile = new File(ps.pkg.baseCodePath);
             File newFile = BEnvironment.getBaseApkDir(ps.pkg.packageName);
             try {
@@ -42,14 +59,15 @@ public class CopyExecutor implements Executor {
                     FileUtils.copyFile(origFile, newFile);
                 }
                 newFile.setReadOnly();
-                
+
                 ps.pkg.baseCodePath = newFile.getAbsolutePath();
             } catch (IOException e) {
-                e.printStackTrace();
+                lastError = describe(e);
+                Slog.e(TAG, "copy apk failed: " + origFile + " -> " + newFile, e);
                 return -4;
             }
         } else if (option.isFlag(InstallOption.FLAG_SYSTEM)) {
-            
+
         }
         return 0;
     }
