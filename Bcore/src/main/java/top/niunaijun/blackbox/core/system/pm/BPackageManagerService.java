@@ -284,6 +284,10 @@ public class BPackageManagerService extends IBPackageManagerService.Stub impleme
             ps = mPackages.get(packageName);
         }
         if (ps != null) {
+            // Idempotent self-heal: repairs a package persisted with an empty component tree
+            // (API 36 / container builds) so this query — and launcher resolution — sees
+            // components even when the install record predates the fix.
+            ensureComponents(ps);
             return PackageManagerCompat.generatePackageInfo(ps, flags, ps.readUserState(userId), userId);
         }
         return null;
@@ -919,9 +923,64 @@ public class BPackageManagerService extends IBPackageManagerService.Stub impleme
         return new ArrayList<>(mPackages.values());
     }
 
+    /** True when the given package has at least one registered component. */
+    private static boolean hasComponents(BPackage pkg) {
+        if (pkg == null) return false;
+        return (pkg.activities != null && !pkg.activities.isEmpty())
+                || (pkg.services != null && !pkg.services.isEmpty())
+                || (pkg.receivers != null && !pkg.receivers.isEmpty())
+                || (pkg.providers != null && !pkg.providers.isEmpty());
+    }
+
+    /**
+     * Idempotent self-heal for packages persisted with an empty component tree.
+     *
+     * On Android 16 / APK-container builds getPackageArchiveInfo() returns no components, so a
+     * package cloned before the component-rebuild fix (or kept across an app upgrade that does
+     * not clear the virtual space) has no activities/services/receivers/providers and can never
+     * resolve a launcher. The host PackageManager still holds the fully parsed components, so
+     * rebuild them in place, persist the result, and refresh the component index.
+     */
+    boolean ensureComponents(BPackageSettings ps) {
+        if (ps == null || ps.pkg == null) return false;
+        if (hasComponents(ps.pkg)) return true;
+        String pkgName = ps.pkg.packageName;
+        if (TextUtils.isEmpty(pkgName) || Objects.equals(pkgName, BlackBoxCore.getHostPkg())) {
+            return false;
+        }
+        try {
+            PackageInfo host = top.niunaijun.blackbox.utils.compat.PackageParserFix
+                    .getInstalledPackageInfo(BlackBoxCore.getContext(), pkgName);
+            if (host == null
+                    || !top.niunaijun.blackbox.utils.compat.PackageParserFix.hasComponents(host)) {
+                Slog.w(TAG, "ensureComponents: host has no components for " + pkgName);
+                return false;
+            }
+            if (!ps.pkg.addComponentsFromPackageInfo(host)) {
+                return false;
+            }
+            ps.save();
+            mComponentResolver.removeAllComponents(ps.pkg);
+            mComponentResolver.addAllComponents(ps.pkg);
+            Slog.d(TAG, "ensureComponents: repaired " + pkgName
+                    + " A=" + ps.pkg.activities.size() + " S=" + ps.pkg.services.size()
+                    + " R=" + ps.pkg.receivers.size() + " P=" + ps.pkg.providers.size());
+            return true;
+        } catch (Throwable t) {
+            Slog.e(TAG, "ensureComponents failed for " + pkgName + ": " + t);
+            return false;
+        }
+    }
+
     @Override
     public void systemReady() {
         mSettings.scanPackage();
+        // Repair any legacy/empty-component package before rebuilding the index below. This runs
+        // on every framework start, so a user who only replaces the APK (without re-cloning)
+        // still gets the old install records fixed automatically.
+        for (BPackageSettings value : mPackages.values()) {
+            ensureComponents(value);
+        }
         for (BPackageSettings value : mPackages.values()) {
             mComponentResolver.removeAllComponents(value.pkg);
             mComponentResolver.addAllComponents(value.pkg);

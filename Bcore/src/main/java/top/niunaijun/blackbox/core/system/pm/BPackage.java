@@ -119,6 +119,69 @@ public class BPackage implements Parcelable {
         return pkg;
     }
 
+    /**
+     * Rebuild ONLY the component lists of this package from a host PackageInfo, keeping every
+     * other field (paths, signatures, permissions, applicationInfo, installOption) untouched.
+     *
+     * This repairs packages that were persisted with an empty component tree — a common outcome
+     * on Android 16 / APK-container builds where getPackageArchiveInfo() returns no components,
+     * and for apps cloned before the component-rebuild fix shipped. Unlike fromPackageInfo(), it
+     * can be applied in place to an already-loaded, already-installed BPackage.
+     *
+     * @return true when at least one component was added.
+     */
+    public boolean addComponentsFromPackageInfo(PackageInfo pi) {
+        if (pi == null) {
+            return false;
+        }
+        activities.clear();
+        receivers.clear();
+        services.clear();
+        providers.clear();
+        if (pi.activities != null) {
+            for (ActivityInfo info : pi.activities) {
+                if (info != null && info.name != null) {
+                    Activity a = new Activity(info);
+                    a.owner = this;
+                    activities.add(a);
+                }
+            }
+        }
+        if (pi.receivers != null) {
+            for (ActivityInfo info : pi.receivers) {
+                if (info != null && info.name != null) {
+                    Activity a = new Activity(info);
+                    a.owner = this;
+                    receivers.add(a);
+                }
+            }
+        }
+        if (pi.services != null) {
+            for (ServiceInfo info : pi.services) {
+                if (info != null && info.name != null) {
+                    Service s = new Service(info);
+                    s.owner = this;
+                    services.add(s);
+                }
+            }
+        }
+        if (pi.providers != null) {
+            for (ProviderInfo info : pi.providers) {
+                if (info != null && info.name != null) {
+                    Provider p = new Provider(info);
+                    p.owner = this;
+                    providers.add(p);
+                }
+            }
+        }
+        boolean ok = !activities.isEmpty() || !services.isEmpty()
+                || !receivers.isEmpty() || !providers.isEmpty();
+        android.util.Log.d("BPackage", "addComponentsFromPackageInfo " + packageName
+                + " ok=" + ok + " A=" + activities.size() + " S=" + services.size()
+                + " R=" + receivers.size() + " P=" + providers.size());
+        return ok;
+    }
+
     public BPackage(PackageParser.Package aPackage) {
         this.activities = new ArrayList<>(aPackage.activities.size());
         for (PackageParser.Activity activity : aPackage.activities) {

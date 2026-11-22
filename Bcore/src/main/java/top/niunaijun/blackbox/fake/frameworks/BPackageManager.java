@@ -148,8 +148,11 @@ public class BPackageManager extends BlackManager<IBPackageManagerService> {
             }
             PackageInfo info = service.getPackageInfo(packageName,
                     android.content.pm.PackageManager.GET_ACTIVITIES, userId);
-            if (info == null || info.activities == null) {
-                return null;
+            if (info == null || info.activities == null || info.activities.length == 0) {
+                // Virtual PM has no components at all (e.g. a container that hid them, or a
+                // pre-fix install record that could not be self-healed). Build the explicit
+                // intent straight from the host PM as a last resort.
+                return createExplicitLaunchIntentFromHost(packageName);
             }
             String chosen = null;
             // Prefer an exported activity that is not a tool/widget; otherwise take the first.
@@ -184,6 +187,53 @@ public class BPackageManager extends BlackManager<IBPackageManagerService> {
             return intent;
         } catch (Exception e) {
             Log.w(TAG, "createExplicitLaunchIntent failed for " + packageName, e);
+            return null;
+        }
+    }
+
+    /**
+     * Last-resort launcher resolution that reads the host PackageManager directly. Used when the
+     * virtual PM has no activities at all but the host still exposes the package. The host's
+     * launcher component class name is exactly the activity the stub must start in the virtual
+     * process, so an explicit component with an explicit package works here.
+     */
+    private Intent createExplicitLaunchIntentFromHost(String packageName) {
+        try {
+            android.content.pm.PackageManager pm = BlackBoxCore.getContext().getPackageManager();
+            String chosen = null;
+            Intent hostLaunch = pm.getLaunchIntentForPackage(packageName);
+            if (hostLaunch != null && hostLaunch.getComponent() != null) {
+                chosen = hostLaunch.getComponent().getClassName();
+            }
+            if (chosen == null) {
+                PackageInfo pi = top.niunaijun.blackbox.utils.compat.PackageParserFix
+                        .getInstalledPackageInfo(BlackBoxCore.getContext(), packageName);
+                if (pi != null && pi.activities != null) {
+                    for (android.content.pm.ActivityInfo ai : pi.activities) {
+                        if (ai == null || ai.name == null) continue;
+                        if (ai.exported) {
+                            chosen = ai.name;
+                            break;
+                        }
+                        if (chosen == null) chosen = ai.name;
+                    }
+                }
+            }
+            if (chosen == null) {
+                Log.w(TAG, "No host launcher activity for " + packageName);
+                return null;
+            }
+            Intent intent = new Intent(Intent.ACTION_MAIN);
+            intent.addCategory(Intent.CATEGORY_LAUNCHER);
+            intent.setClassName(packageName, chosen);
+            // LauncherActivity.launch()/onCreate() read getPackage() to carry the package name;
+            // setClassName() alone does not populate it.
+            intent.setPackage(packageName);
+            intent.setFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+            Log.d(TAG, "Host-derived explicit launch intent for " + packageName + ": " + chosen);
+            return intent;
+        } catch (Exception e) {
+            Log.w(TAG, "createExplicitLaunchIntentFromHost failed for " + packageName, e);
             return null;
         }
     }
