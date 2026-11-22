@@ -1,0 +1,66 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:id="@+id/dialog_update_root"
+    android:layout_width="match_parent"
+    android:layout_height="wrap_content"
+    android:orientation="vertical"
+    android:paddingStart="4dp"
+    android:paddingEnd="4dp"
+    android:paddingTop="4dp">
+
+    <!-- 版本信息副标题 -->
+    <TextView
+        android:id="@+id/update_subtitle"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:textColor="@color/secondary_text"
+        android:textSize="12sp"
+        android:layout_marginBottom="10dp" />
+
+    <!-- 更新说明 -->
+    <TextView
+        android:id="@+id/update_notes"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:background="#0D000000"
+        android:padding="12dp"
+        android:textColor="@color/primary_text"
+        android:textSize="13sp"
+        android:lineSpacingExtra="3dp" />
+
+    <!-- 下载进度区 -->
+    <LinearLayout
+        android:id="@+id/update_progress_box"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="vertical"
+        android:visibility="gone"
+        android:layout_marginTop="14dp">
+
+        <ProgressBar
+            android:id="@+id/update_progress"
+            style="?android:attr/progressBarStyleHorizontal"
+            android:layout_width="match_parent"
+            android:layout_height="8dp"
+            android:max="100" />
+
+        <TextView
+            android:id="@+id/update_progress_text"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="6dp"
+            android:gravity="center"
+            android:textColor="@color/secondary_text"
+            android:textSize="12sp" />
+    </LinearLayout>
+
+    <!-- 弹窗内临时提示（如无直达授权页） -->
+    <TextView
+        android:id="@+id/update_tip"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="10dp"
+        android:textColor="#B00020"
+        android:textSize="12sp"
+        android:visibility="gone" />
+</LinearLayout>

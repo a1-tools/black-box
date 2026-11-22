@@ -7,7 +7,7 @@ android {
 
     namespace 'top.niunaijun.blackboxa'
     compileSdk rootProject.ext.compileSdkVersion
-    buildToolsVersion "36.1.0"
+    buildToolsVersion rootProject.ext.buildToolsVersion
     ndkVersion = "27.0.12077973"
     defaultConfig {
         applicationId "top.niunaijun.blackbox"
@@ -17,6 +17,10 @@ android {
         versionName rootProject.ext.versionName
 
         testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
+
+        // 应用内更新：清单基址，可用 -PupdateBase=... 覆盖（本地测试/自建镜像）
+        buildConfigField "String", "UPDATE_BASE",
+                "\"${project.findProperty('updateBase') ?: 'https://raw.githubusercontent.com/a1-tools/black-box/main/update'}\""
 
         splits {
             abi {
@@ -42,6 +46,7 @@ android {
     }
     buildFeatures {
         viewBinding true
+        buildConfig true
     }
     kotlinOptions {
         jvmTarget = '17'
@@ -75,9 +80,9 @@ dependencies {
 
     implementation "androidx.preference:preference-ktx:1.1.1"
     
-    implementation "androidx.lifecycle:lifecycle-viewmodel-ktx:2.3.1"
-    implementation "androidx.lifecycle:lifecycle-livedata-ktx:2.3.1"
-    implementation "androidx.lifecycle:lifecycle-runtime-ktx:2.3.1"
+    implementation "androidx.lifecycle:lifecycle-viewmodel-ktx:2.6.2"
+    implementation "androidx.lifecycle:lifecycle-livedata-ktx:2.6.2"
+    implementation "androidx.lifecycle:lifecycle-runtime-ktx:2.6.2"
 
     
     implementation 'androidx.recyclerview:recyclerview:1.2.1'
@@ -102,5 +107,9 @@ dependencies {
 
     
     implementation 'androidx.work:work-runtime:2.7.1'
+
+    // 应用内更新：OkHttp（清单检查 + 断点续传下载）、协程（后台编排）
+    implementation 'com.squareup.okhttp3:okhttp:4.12.0'
+    implementation 'org.jetbrains.kotlinx:kotlinx-coroutines-android:1.9.0'
 
 }

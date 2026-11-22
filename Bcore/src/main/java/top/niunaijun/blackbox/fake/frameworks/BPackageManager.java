@@ -111,11 +111,21 @@ public class BPackageManager extends BlackManager<IBPackageManagerService> {
         if (ris == null || ris.size() <= 0) {
             return null;
         }
-        Intent intent = new Intent(intentToResolve);
-        intent.setFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
-        intent.setClassName(ris.get(0).activityInfo.packageName,
-                ris.get(0).activityInfo.name);
-        return intent;
+        // generateActivityInfo() returns null when checkUseInstalledOrHidden() rejects the
+        // component for this user (not installed / hidden / blacklisted), leaving a ResolveInfo
+        // with a null activityInfo. Skip those entries instead of dereferencing them,
+        // which used to crash launch.
+        for (ResolveInfo ri : ris) {
+            if (ri == null || ri.activityInfo == null) {
+                continue;
+            }
+            Intent intent = new Intent(intentToResolve);
+            intent.setFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+            intent.setClassName(ri.activityInfo.packageName, ri.activityInfo.name);
+            return intent;
+        }
+        Log.w(TAG, "No usable launcher activity for " + packageName + ", using fallback intent");
+        return createFallbackLaunchIntent(packageName);
     }
     
     

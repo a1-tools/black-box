@@ -6,7 +6,7 @@
 [![Build](https://github.com/fdavids77/BlackBoxReborn/actions/workflows/build.yml/badge.svg)](https://github.com/fdavids77/BlackBoxReborn/actions/workflows/build.yml)
 [![Android](https://img.shields.io/badge/android-14%2B-green.svg)](https://developer.android.com)
 [![API](https://img.shields.io/badge/API-34%2B-brightgreen.svg)](https://android-arsenal.com/api?level=34)
-[![License](https://img.shields.io/badge/license-GPL--3.0-blue.svg)](LICENSE)
+[![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 
 BlackBox is an Android app virtualisation framework — it runs apps inside a sandboxed
 container without root, giving each virtual instance its own isolated identity (separate
@@ -189,4 +189,4 @@ for account suspensions or any other consequences. Use responsibly and legally.
 
 ## License
 
-GPL-3.0 — same as upstream BlackBox. See [LICENSE](LICENSE).
+Apache-2.0 — see [LICENSE](LICENSE).

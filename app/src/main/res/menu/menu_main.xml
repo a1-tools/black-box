@@ -4,6 +4,11 @@
 
 
     <item
+            android:id="@+id/main_check_update"
+            android:title="@string/check_update"
+            app:showAsAction="never" />
+
+    <item
             android:id="@+id/main_setting"
             android:title="@string/setting"
             app:showAsAction="never" />

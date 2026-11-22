@@ -6,7 +6,9 @@ alias(libs.plugins.android.application) apply false
 }
 
 ext {
-    compileSdkVersion = 36
+    compileSdkVersion = 35
+    // Local env only: SDK/NDK 36 download was blocked; restore to 36 on a full toolchain.
+    buildToolsVersion = "35.0.0"
     targetSdkVersion = 28  // Keep 28 intentionally — gives broader API access
 
     minSdk = 24  // Android 7.0 — min for test APK install; BlackBox Reborn targets API 34+

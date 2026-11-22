@@ -5,6 +5,7 @@ import android.app.Application
 import android.content.Context
 import android.util.Log
 import top.niunaijun.blackbox.BlackBoxCore
+import top.niunaijun.blackboxa.update.UpdateManager
 
 
 class App : Application() {
@@ -68,6 +69,13 @@ class App : Application() {
             AppManager.doOnCreate(mContext)
         } catch (e: Exception) {
             Log.e("App", "Error in onCreate: ${e.message}")
+        }
+
+        // 应用内更新：每次进程启动静默检查一次（有新版本时由 UpdateDialog 在 MainActivity 弹出）
+        try {
+            UpdateManager.checkOnLaunch(this)
+        } catch (e: Exception) {
+            Log.e("App", "Error checking updates: ${e.message}")
         }
     }
 }

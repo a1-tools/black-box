@@ -4,7 +4,7 @@ android {
     namespace 'top.niunaijun.blackbox'
 
     compileSdk rootProject.ext.compileSdkVersion
-    buildToolsVersion "36.1.0"
+    buildToolsVersion rootProject.ext.buildToolsVersion
 
 
     aidlPackagedList "android/app/IServiceConnection.aidl"

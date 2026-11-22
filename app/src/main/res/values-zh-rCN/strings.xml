@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <string name="app_name">BlackBox</string>
+    <string name="app_name">虚拟框架</string>
     <string name="choose">手动选择</string>
     <string name="choose_app">选择应用</string>
     <string name="installed_app">已安装应用</string>
@@ -11,6 +11,7 @@
     <string name="xp_setting">XP管理</string>
     <string name="tg_group">交流群</string>
     <string name="setting">软件设置</string>
+    <string name="check_update">检查更新</string>
     <string name="permission_setting">权限设置</string>
     <string name="fake_location">虚拟定位(预览版)</string>
     <string name="real_location">真实位置</string>

@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <string name="app_name">BlackBox</string>
+    <string name="app_name">Virtual Framework</string>
     <string name="choose">Choose</string>
     <string name="choose_app">Choose App</string>
     <string name="installed_app">Installed App</string>
@@ -17,6 +17,7 @@
     <string name="close_app_fake_location">Disable FakeLocation for %s</string>
     <string name="close_fake_location_success">Disable FakeLocation for %s Successfully</string>
     <string name="setting">Setting</string>
+    <string name="check_update">Check for Updates</string>
     <string name="jump_module">Go to Module Manager</string>
     <string name="module_setting">Module Manager</string>
     <string name="enable_xposed">Enable Xposed Framework</string>

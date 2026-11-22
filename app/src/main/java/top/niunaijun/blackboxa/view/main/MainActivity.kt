@@ -25,6 +25,8 @@ import top.niunaijun.blackboxa.view.base.LoadingActivity
 import top.niunaijun.blackboxa.view.fake.FakeManagerActivity
 import top.niunaijun.blackboxa.view.list.ListActivity
 import top.niunaijun.blackboxa.view.setting.SettingActivity
+import top.niunaijun.blackboxa.update.UpdateDialog
+import top.niunaijun.blackboxa.update.UpdateManager
 
 class MainActivity : LoadingActivity() {
 
@@ -63,6 +65,20 @@ class MainActivity : LoadingActivity() {
             initFab()
             initToolbarSubTitle()
 
+            // 应用内更新：绑定状态弹窗
+            try {
+                UpdateDialog.bind(this)
+            } catch (e: Exception) {
+                Log.e(TAG, "Error binding update dialog: ${e.message}")
+            }
+
+            // 应用内更新：若启动期间已完成静默检查，把待安装/待提示的状态接上
+            try {
+                UpdateManager.checkOnLaunch(this)
+            } catch (e: Exception) {
+                Log.e(TAG, "Error checking updates: ${e.message}")
+            }
+
             
             checkStoragePermission()
 
@@ -78,6 +94,17 @@ class MainActivity : LoadingActivity() {
             Log.e(TAG, "Critical error in onCreate: ${e.message}")
             
             showErrorDialog("Failed to initialize app: ${e.message}")
+        }
+    }
+
+    override fun onResume() {
+        super.onResume()
+        // 从「安装未知应用」设置页返回后，若已授权则自动继续安装
+        try {
+            UpdateManager.onResume(this)
+            UpdateManager.offerPendingInstall(this)
+        } catch (e: Exception) {
+            Log.e(TAG, "Error in update onResume: ${e.message}")
         }
     }
 
@@ -402,6 +429,9 @@ class MainActivity : LoadingActivity() {
     override fun onOptionsItemSelected(item: MenuItem): Boolean {
         try {
             when (item.itemId) {
+                R.id.main_check_update -> {
+                    UpdateManager.check(this, manual = true)
+                }
                 R.id.main_git -> {
                     val intent =
                             Intent(
