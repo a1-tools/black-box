@@ -780,6 +780,11 @@ public class BPackageManagerService extends IBPackageManagerService.Stub impleme
             // applicationInfo
             pkg.applicationInfo = pi.applicationInfo;
 
+            // The reflection-built Package stub does not populate baseCodePath.
+            // The copy step needs the source APK path to extract so / copy base.apk.
+            // Without this, install always fails with "Invalid package: baseCodePath=null".
+            pkg.baseCodePath = file;
+
             // mSignatures — set via reflection (field may be private)
             android.content.pm.Signature[] sigs =
                 top.niunaijun.blackbox.utils.compat.PackageParserFix.getSignatures(pi);

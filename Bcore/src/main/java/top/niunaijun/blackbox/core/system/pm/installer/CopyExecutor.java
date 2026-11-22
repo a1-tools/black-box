@@ -41,8 +41,13 @@ public class CopyExecutor implements Executor {
             return -3;
         }
         if (TextUtils.isEmpty(ps.pkg.baseCodePath) || TextUtils.isEmpty(ps.pkg.packageName)) {
-            lastError = "Invalid package: baseCodePath=" + ps.pkg.baseCodePath
-                    + ", packageName=" + ps.pkg.packageName;
+            if (TextUtils.isEmpty(ps.pkg.baseCodePath) && TextUtils.isEmpty(ps.pkg.packageName)) {
+                lastError = "baseCodePath and packageName are null";
+            } else if (TextUtils.isEmpty(ps.pkg.baseCodePath)) {
+                lastError = "baseCodePath is null";
+            } else {
+                lastError = "packageName is null";
+            }
             return -3;
         }
         try {
