@@ -79,7 +79,7 @@ import top.niunaijun.blackbox.utils.LogSender;
 public class BlackBoxCore extends ClientConfiguration {
     public static final String TAG = "BlackBoxCore";
     /** Bumped with every launch-fix build so an on-screen diagnostic identifies the installed APK. */
-    public static final String DIAG_BUILD = "bb-4.0.2-launch-diag";
+    public static final String DIAG_BUILD = "bb-4.0.3-lazy-index";
 
     private static final BlackBoxCore sBlackBoxCore = new BlackBoxCore();
     private static Context sContext;
@@ -151,7 +151,7 @@ public class BlackBoxCore extends ClientConfiguration {
 
     public static String getLaunchTrace() {
         return "stage=" + sLastLaunchStage + " resolved=" + sLastResolvedActivity
-                + " resolveCheck=" + sLastResolveCheck + " index=" + sIndexRebuild;
+                + " resolveCheck=" + sLastResolveCheck;
     }
 
     public void setLastLaunchError(String reason) { mLastLaunchError = reason; }
@@ -1321,7 +1321,21 @@ public class BlackBoxCore extends ClientConfiguration {
         sb.append("launchStage=").append(sLastLaunchStage).append("\n");
         sb.append("resolvedActivity=").append(sLastResolvedActivity).append("\n");
         sb.append("resolveCheck=").append(sLastResolveCheck).append("\n");
-        sb.append("indexRebuild=").append(sIndexRebuild).append("\n");
+        // Ask the :black service process directly. A static field in this process cannot
+        // reflect its index state, which is why the old indexRebuild line always said not-run.
+        try {
+            PackageInfo probePi = getBPackageManager().getPackageInfo(packageName,
+                    PackageManager.GET_ACTIVITIES, userId);
+            String firstName = probePi == null || probePi.activities == null
+                    || probePi.activities.length == 0 ? null : probePi.activities[0].name;
+            android.content.pm.ActivityInfo probe = firstName == null ? null
+                    : getBPackageManager().getActivityInfo(
+                            new android.content.ComponentName(packageName, firstName), 0, userId);
+            sb.append("  indexProbe=")
+                    .append(probe == null ? "EMPTY" : "OK " + firstName).append("\n");
+        } catch (Throwable t) {
+            sb.append("  indexProbe=ERROR ").append(t).append("\n");
+        }
         sb.append("launchIntentSource=").append(
                 top.niunaijun.blackbox.utils.compat.PackageParserFix
                         .getLastSource(packageName)).append("\n");

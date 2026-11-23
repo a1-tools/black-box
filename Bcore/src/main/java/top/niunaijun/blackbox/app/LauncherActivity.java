@@ -15,7 +15,6 @@ import androidx.annotation.Nullable;
 
 import top.niunaijun.blackbox.BlackBoxCore;
 import top.niunaijun.blackbox.R;
-import top.niunaijun.blackbox.core.system.pm.BPackageManagerService;
 import top.niunaijun.blackbox.utils.Slog;
 import android.util.Log;
 import android.widget.ImageView;
@@ -142,52 +141,33 @@ public class LauncherActivity extends Activity {
             }
             
             
-            // Pre-flight check: ActivityStack.startActivityLocked() silently returns 0 when
-            // resolveActivity() finds no matching component. That leaves the user staring at a
-            // black window with only the status bar and no error at all. Verify the route here
-            // and, when it fails, show the full diagnostic on screen instead.
-            boolean routable = false;
+            // Advisory pre-flight over Binder (the :black service process). The local
+            // BPackageManagerService singleton in THIS process never runs systemReady(), so
+            // consulting it yields a false "no route"; that mistake must never block a launch.
             try {
-                ResolveInfo resolved = BPackageManagerService.get().resolveActivity(
+                ResolveInfo resolved = BlackBoxCore.getBPackageManager().resolveActivity(
                         launchIntent, PackageManager.GET_ACTIVITIES, null, userId);
                 if (resolved != null && resolved.activityInfo != null) {
-                    routable = true;
                     BlackBoxCore.recordResolveCheck("OK " + resolved.activityInfo.name);
                     BlackBoxCore.recordResolvedActivity(
                             resolved.activityInfo.packageName + "/" + resolved.activityInfo.name);
-                    BlackBoxCore.recordLaunchStage("resolved");
                 } else {
-                    BlackBoxCore.recordResolveCheck("NULL");
-                    BlackBoxCore.recordLaunchStage("resolve_failed");
+                    BlackBoxCore.recordResolveCheck("NULL (advisory, launch still attempted)");
                 }
             } catch (Throwable t) {
-                // A failure inside the pre-flight itself must not block a launch that could
-                // still succeed, so record it and continue with the real start.
                 BlackBoxCore.recordResolveCheck("EXCEPTION " + t);
-                routable = true;
             }
-            if (!routable) {
-                String component = launchIntent.getComponent() == null ? "none"
-                        : launchIntent.getComponent().flattenToString();
-                BlackBoxCore.get().setLastLaunchError("resolve_activity_null (pkg=" + packageName
-                        + ", user=" + userId + ", component=" + component + ")");
-                showLaunchError(packageName, userId,
-                        "路由失败：虚拟框架找不到目标 Activity");
-                return;
-            }
+            BlackBoxCore.recordLaunchStage("launch_requested");
             launchAppAsync(launchIntent, userId, packageName);
             // Watchdog: a successful route can still end in a black window if the stub process
             // never mounts the target app. Record that state so the diagnostic report explains
             // it instead of leaving the user with an unexplained black screen.
+            final String targetPkg = packageName;
             mHandler.postDelayed(() -> {
                 if (!mLaunchObserved && !isFinishing() && !isDestroyed()) {
                     BlackBoxCore.recordLaunchStage("no_activity_window_8s");
-                    try {
-                        Toast.makeText(this,
-                                "启动后 8 秒仍未出现应用窗口，请打开诊断报告查看",
-                                Toast.LENGTH_LONG).show();
-                    } catch (Throwable ignored) {
-                    }
+                    showLaunchError(targetPkg, userId,
+                            "启动后 8 秒仍未出现应用窗口");
                 }
             }, 8000);
             
@@ -280,7 +260,8 @@ public class LauncherActivity extends Activity {
                     .setTitle("虚拟应用启动失败")
                     .setView(scroll)
                     .setPositiveButton("返回", (dialog, which) -> finish())
-                    .setCancelable(false)
+                    .setNegativeButton("继续等待", null)
+                    .setCancelable(true)
                     .show();
         } catch (Throwable t) {
             Slog.e(TAG, "Failed to show launch error", t);

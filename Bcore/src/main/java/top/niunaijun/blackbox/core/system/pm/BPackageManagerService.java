@@ -66,6 +66,8 @@ public class BPackageManagerService extends IBPackageManagerService.Stub impleme
     final Object mInstallLock = new Object();
     /** Packages whose component repair was already attempted this process (avoids re-parsing APKs). */
     private final Set<String> mRepairAttempted = Collections.synchronizedSet(new HashSet<String>());
+    /** The resolver index is built lazily because startup() may never run in APK containers. */
+    private volatile boolean mComponentIndexBuilt = false;
 
     public static BPackageManagerService get() {
         return sService;
@@ -330,12 +332,30 @@ public class BPackageManagerService extends IBPackageManagerService.Stub impleme
     @Override
     public ActivityInfo getActivityInfo(ComponentName component, int flags, int userId) {
         if (!sUserManager.exists(userId)) return null;
+        ensureComponentIndex();
         synchronized (mPackages) {
+            BPackageSettings ps = mPackages.get(component.getPackageName());
             BPackage.Activity a = mComponentResolver.getActivity(component);
 
-            if (a != null) {
-                BPackageSettings ps = mPackages.get(component.getPackageName());
-                if (ps == null) return null;
+            // Direct scan fallback: even when the resolver index could not be built, the
+            // persisted BPackage still carries the full activity list. Silently returning null
+            // here is what produced a black window with no error at all.
+            if (a == null && ps != null && ps.pkg != null) {
+                for (BPackage.Activity candidate : ps.pkg.activities) {
+                    if (candidate != null && candidate.info != null
+                            && component.getClassName().equals(candidate.className)) {
+                        a = candidate;
+                        break;
+                    }
+                }
+                if (a != null) {
+                    prepareForIndexing(ps.pkg);
+                    if (a.info.applicationInfo == null) {
+                        a.info.applicationInfo = ps.pkg.applicationInfo;
+                    }
+                }
+            }
+            if (a != null && ps != null) {
                 return PackageManagerCompat.generateActivityInfo(
                         a, flags, ps.readUserState(userId), userId);
             }
@@ -370,6 +390,7 @@ public class BPackageManagerService extends IBPackageManagerService.Stub impleme
 
 
         if (!sUserManager.exists(userId)) return Collections.emptyList();
+        ensureComponentIndex();
 
         
         synchronized (mPackages) {
@@ -394,6 +415,7 @@ public class BPackageManagerService extends IBPackageManagerService.Stub impleme
     private List<ApplicationInfo> getInstalledApplicationsListInternal(int flags, int userId,
                                                                        int callingUid) {
         if (!sUserManager.exists(userId)) return Collections.emptyList();
+        ensureComponentIndex();
 
         
         synchronized (mPackages) {
@@ -422,6 +444,7 @@ public class BPackageManagerService extends IBPackageManagerService.Stub impleme
     @Override
     public List<ResolveInfo> queryIntentActivities(Intent intent, int flags, String resolvedType, int userId) throws RemoteException {
         if (!sUserManager.exists(userId)) return Collections.emptyList();
+        ensureComponentIndex();
         final String pkgName = intent.getPackage();
         ComponentName comp = intent.getComponent();
         if (comp == null) {
@@ -476,6 +499,7 @@ public class BPackageManagerService extends IBPackageManagerService.Stub impleme
     @Override
     public List<ResolveInfo> queryBroadcastReceivers(Intent intent, int flags, String resolvedType, int userId) throws RemoteException {
         if (!sUserManager.exists(userId)) return Collections.emptyList();
+        ensureComponentIndex();
 
         ComponentName comp = intent.getComponent();
         if (comp == null) {
@@ -516,6 +540,7 @@ public class BPackageManagerService extends IBPackageManagerService.Stub impleme
     @Override
     public List<ProviderInfo> queryContentProviders(String processName, int uid, int flags, int userId) throws RemoteException {
         if (!sUserManager.exists(userId)) return Collections.emptyList();
+        ensureComponentIndex();
 
         List<ProviderInfo> providers = new ArrayList<>();
         if (TextUtils.isEmpty(processName))
@@ -622,6 +647,7 @@ public class BPackageManagerService extends IBPackageManagerService.Stub impleme
     @Override
     public List<InstalledPackage> getInstalledPackagesAsUser(int userId) {
         if (!sUserManager.exists(userId)) return Collections.emptyList();
+        ensureComponentIndex();
         synchronized (mPackages) {
             List<InstalledPackage> installedPackages = new ArrayList<>();
             for (BPackageSettings ps : mPackages.values()) {
@@ -1029,43 +1055,62 @@ public class BPackageManagerService extends IBPackageManagerService.Stub impleme
     @Override
     public void systemReady() {
         mSettings.scanPackage();
-        // Repair any legacy/empty-component package before rebuilding the index below. This runs
-        // on every framework start, so a user who only replaces the APK (without re-cloning)
-        // still gets the old install records fixed automatically.
-        //
-        // Every package is isolated. Previously a single malformed legacy record threw out of
-        // this method and aborted index building for ALL packages; the Application swallows that
-        // exception, so the UI still opens but every resolveActivity() returns null and the user
-        // only sees a silent black screen. This is the first build that actually indexes the
-        // recovered AXML components, so the untested path matters here.
-        int failed = 0;
-        String firstError = null;
+        // Repair legacy/empty-component records, isolated per package so one malformed record
+        // cannot abort the whole pass.
         synchronized (mPackages) {
             for (BPackageSettings value : mPackages.values()) {
                 try {
                     ensureComponents(value);
                 } catch (Throwable t) {
-                    failed++;
-                    if (firstError == null) firstError = "repair " + packageLabel(value) + ": " + t;
                     Slog.e(TAG, "ensureComponents crashed for " + packageLabel(value) + ": " + t);
                 }
             }
-            for (BPackageSettings value : mPackages.values()) {
+        }
+        ensureComponentIndex();
+    }
+
+    /**
+     * Build the component resolver index on demand.
+     *
+     * BlackBoxSystem.startup() (and therefore systemReady()) is only invoked from
+     * SystemCallProvider.onCreate(), which is declared in the :black process. APK containers
+     * may never instantiate that provider, so the resolver index stays empty: getPackageInfo()
+     * still reports 58 activities but getActivityInfo()/resolveActivity() return null. Building
+     * the index on the first query removes that dependency entirely.
+     */
+    void ensureComponentIndex() {
+        if (mComponentIndexBuilt) return;
+        synchronized (mPackages) {
+            if (mComponentIndexBuilt) return;
+            if (mPackages.isEmpty()) {
                 try {
-                    if (value == null || value.pkg == null) continue;
-                    prepareForIndexing(value.pkg);
-                    mComponentResolver.removeAllComponents(value.pkg);
-                    mComponentResolver.addAllComponents(value.pkg);
+                    mSettings.scanPackage();
                 } catch (Throwable t) {
-                    failed++;
-                    if (firstError == null) firstError = "index " + packageLabel(value) + ": " + t;
-                    Slog.e(TAG, "index rebuild failed for " + packageLabel(value) + ": " + t);
+                    Slog.w(TAG, "lazy scanPackage failed: " + t);
                 }
             }
+            int failed = 0;
+            int activities = 0;
+            String firstError = null;
+            for (BPackageSettings ps : mPackages.values()) {
+                try {
+                    if (ps == null || ps.pkg == null) continue;
+                    prepareForIndexing(ps.pkg);
+                    mComponentResolver.removeAllComponents(ps.pkg);
+                    mComponentResolver.addAllComponents(ps.pkg);
+                    activities += ps.pkg.activities.size();
+                } catch (Throwable t) {
+                    failed++;
+                    if (firstError == null) firstError = packageLabel(ps) + ": " + t;
+                    Slog.e(TAG, "index rebuild failed for " + packageLabel(ps) + ": " + t);
+                }
+            }
+            mComponentIndexBuilt = true;
+            BlackBoxCore.recordIndexRebuild(failed == 0
+                    ? "LAZY OK packages=" + mPackages.size() + " activities=" + activities
+                    : "LAZY FAILED " + failed + " first=" + firstError);
+            Slog.d(TAG, "component index built: activities=" + activities + " failed=" + failed);
         }
-        BlackBoxCore.recordIndexRebuild(failed == 0
-                ? "OK packages=" + mPackages.size()
-                : "FAILED " + failed + " first=" + firstError);
     }
 
     private static String packageLabel(BPackageSettings ps) {
