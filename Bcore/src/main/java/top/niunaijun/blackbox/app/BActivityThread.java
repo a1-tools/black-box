@@ -77,6 +77,7 @@ import top.niunaijun.blackbox.fake.delegate.ContentProviderDelegate;
 import top.niunaijun.blackbox.fake.hook.HookManager;
 import top.niunaijun.blackbox.fake.service.HCallbackProxy;
 import top.niunaijun.blackbox.utils.Reflector;
+import top.niunaijun.blackbox.utils.BBDiag;
 import top.niunaijun.blackbox.utils.SafeContextWrapper;
 import top.niunaijun.blackbox.utils.GlobalContextWrapper;
 import top.niunaijun.blackbox.utils.Slog;
@@ -97,6 +98,12 @@ public class BActivityThread extends IBActivityThread.Stub {
     private final List<ProviderInfo> mProviders = new ArrayList<>();
     private final Handler mH = BlackBoxCore.get().getHandler();
     private static final Object mConfigLock = new Object();
+    /** Set once bindApplication has irreversibly failed, so the launch message is not re-queued forever. */
+    private volatile boolean mBindFailed = false;
+
+    public boolean hasBindFailed() {
+        return mBindFailed;
+    }
 
     public static boolean isThreadInit() {
         return sBActivityThread != null;
@@ -314,17 +321,24 @@ public class BActivityThread extends IBActivityThread.Stub {
     }
 
     public void bindApplication(final String packageName, final String processName) {
+        BBDiag.trace("bind", "bindApplication entry pkg=" + packageName
+                + " mainLooper=" + (Looper.myLooper() == Looper.getMainLooper()));
         if (Looper.myLooper() != Looper.getMainLooper()) {
             final ConditionVariable conditionVariable = new ConditionVariable();
             BlackBoxCore.get().getHandler().post(() -> {
-                
-                Object bindData = createBindApplicationData(packageName, processName);
-                handleBindApplication(packageName, processName);
-                conditionVariable.open();
+                try {
+                    Object bindData = createBindApplicationData(packageName, processName);
+                    handleBindApplication(packageName, processName);
+                } catch (Throwable t) {
+                    BBDiag.crash(Thread.currentThread(), t);
+                } finally {
+                    conditionVariable.open();
+                }
             });
-            conditionVariable.block();
+            // Bounded wait: an unbounded block() on a wedged handler is another route to an
+            // ANR followed by a silent process exit.
+            conditionVariable.block(8000);
         } else {
-            
             Object bindData = createBindApplicationData(packageName, processName);
             handleBindApplication(packageName, processName);
         }
@@ -362,21 +376,80 @@ public class BActivityThread extends IBActivityThread.Stub {
             CrashHandler.create();
         } catch (Throwable ignored) {
         }
+        BBDiag.stage("bind:start pkg=" + packageName + " proc=" + processName);
+        try {
+            handleBindApplicationInner(packageName, processName);
+            BBDiag.stage("bind:done");
+        } catch (Throwable t) {
+            // An exception escaping into ActivityThread.H used to kill the whole stub process:
+            // white window, then a silent exit a moment later. Persist it and degrade instead.
+            mBindFailed = true;
+            BBDiag.crash(Thread.currentThread(), t);
+            BBDiag.stage("bind:FAILED " + t);
+            Slog.e(TAG, "handleBindApplication failed (degraded, process kept alive)", t);
+            // isInit() must become true, otherwise HCallbackProxy re-queues the same launch
+            // transaction forever and the main thread ANRs.
+            if (mBoundApplication == null) {
+                try {
+                    AppBindData d = new AppBindData();
+                    d.appInfo = new ApplicationInfo();
+                    d.appInfo.packageName = packageName;
+                    d.processName = processName;
+                    d.providers = mProviders;
+                    mBoundApplication = d;
+                } catch (Throwable ignored2) {
+                }
+            }
+        }
+    }
 
+    private void handleBindApplicationInner(String packageName, String processName) {
+        BBDiag.stage("bind:loadPackageInfo");
         PackageInfo packageInfo = BlackBoxCore.getBPackageManager().getPackageInfo(packageName, PackageManager.GET_PROVIDERS, BActivityThread.getUserId());
+        if (packageInfo == null) {
+            BBDiag.trace("bind", "packageInfo NULL for " + packageName);
+            throw new IllegalStateException("virtual PackageInfo is NULL for " + packageName);
+        }
         ApplicationInfo applicationInfo = packageInfo.applicationInfo;
+        if (applicationInfo == null) {
+            applicationInfo = new ApplicationInfo();
+            applicationInfo.packageName = packageName;
+            applicationInfo.processName = processName;
+            packageInfo.applicationInfo = applicationInfo;
+            BBDiag.trace("bind", "applicationInfo NULL -> created minimal one");
+        }
         if (packageInfo.providers == null) {
             packageInfo.providers = new ProviderInfo[]{};
         }
         mProviders.addAll(Arrays.asList(packageInfo.providers));
 
+        BBDiag.stage("bind:createPackageContext");
         Object boundApplication = BRActivityThread.get(BlackBoxCore.mainThread()).mBoundApplication();
 
         Context packageContext = createPackageContext(applicationInfo);
-        Object loadedApk = BRContextImpl.get(packageContext).mPackageInfo();
-        BRLoadedApk.get(loadedApk)._set_mSecurityViolation(false);
-        
-        BRLoadedApk.get(loadedApk)._set_mApplicationInfo(applicationInfo);
+        if (packageContext == null) {
+            BBDiag.trace("bind", "packageContext NULL -> host context fallback");
+            packageContext = BlackBoxCore.getContext();
+        }
+        Object loadedApk;
+        try {
+            loadedApk = BRContextImpl.get(packageContext).mPackageInfo();
+        } catch (Throwable t) {
+            BBDiag.trace("bind", "mPackageInfo reflection FAILED: " + t);
+            throw new RuntimeException("Unable to read LoadedApk", t);
+        }
+        // These two hidden-API setters are non-fatal in APK containers where the reflection
+        // bridge may not match the platform. Failing them must not abort the whole bind.
+        try {
+            BRLoadedApk.get(loadedApk)._set_mSecurityViolation(false);
+        } catch (Throwable t) {
+            BBDiag.trace("bind", "_set_mSecurityViolation failed: " + t);
+        }
+        try {
+            BRLoadedApk.get(loadedApk)._set_mApplicationInfo(applicationInfo);
+        } catch (Throwable t) {
+            BBDiag.trace("bind", "_set_mApplicationInfo failed: " + t);
+        }
 
         int targetSdkVersion = applicationInfo.targetSdkVersion;
         if (targetSdkVersion < Build.VERSION_CODES.GINGERBREAD) {
@@ -389,19 +462,45 @@ public class BActivityThread extends IBActivityThread.Stub {
             }
         }
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
-            WebView.setDataDirectorySuffix(getUserId() + ":" + packageName + ":" + processName);
+            try {
+                WebView.setDataDirectorySuffix(getUserId() + ":" + packageName + ":" + processName);
+            } catch (Throwable t) {
+                // Throws IllegalStateException when the suffix was already set in this process.
+                BBDiag.trace("bind", "WebView.setDataDirectorySuffix skipped: " + t);
+            }
         }
 
-        VirtualRuntime.setupRuntime(processName, applicationInfo);
-
-        BRVMRuntime.get(BRVMRuntime.get().getRuntime()).setTargetSdkVersion(applicationInfo.targetSdkVersion);
+        BBDiag.stage("bind:setupRuntime");
+        try {
+            VirtualRuntime.setupRuntime(processName, applicationInfo);
+        } catch (Throwable t) {
+            BBDiag.trace("bind", "VirtualRuntime.setupRuntime failed: " + t);
+        }
+        try {
+            BRVMRuntime.get(BRVMRuntime.get().getRuntime()).setTargetSdkVersion(applicationInfo.targetSdkVersion);
+        } catch (Throwable t) {
+            BBDiag.trace("bind", "VMRuntime.setTargetSdkVersion failed: " + t);
+        }
         if (BuildCompat.isS()) {
-            BRCompatibility.get().setTargetSdkVersion(applicationInfo.targetSdkVersion);
+            try {
+                BRCompatibility.get().setTargetSdkVersion(applicationInfo.targetSdkVersion);
+            } catch (Throwable t) {
+                BBDiag.trace("bind", "Compatibility.setTargetSdkVersion failed: " + t);
+            }
         }
 
-        NativeCore.init(Build.VERSION.SDK_INT);
-        assert packageContext != null;
-        IOCore.get().enableRedirect(packageContext);
+        BBDiag.stage("bind:nativeAndIo");
+        try {
+            NativeCore.init(Build.VERSION.SDK_INT);
+        } catch (Throwable t) {
+            BBDiag.crash(Thread.currentThread(), t);
+            BBDiag.trace("bind", "NativeCore.init FAILED: " + t);
+        }
+        try {
+            IOCore.get().enableRedirect(packageContext);
+        } catch (Throwable t) {
+            BBDiag.trace("bind", "IOCore.enableRedirect failed: " + t);
+        }
 
         AppBindData bindData = new AppBindData();
         bindData.appInfo = applicationInfo;
@@ -409,20 +508,31 @@ public class BActivityThread extends IBActivityThread.Stub {
         bindData.info = loadedApk;
         bindData.providers = mProviders;
 
-        ActivityThreadAppBindDataContext activityThreadAppBindData = BRActivityThreadAppBindData.get(boundApplication);
-        activityThreadAppBindData._set_instrumentationName(new ComponentName(bindData.appInfo.packageName, Instrumentation.class.getName()));
-        activityThreadAppBindData._set_appInfo(bindData.appInfo);
-        activityThreadAppBindData._set_info(bindData.info);
-        activityThreadAppBindData._set_processName(bindData.processName);
-        activityThreadAppBindData._set_providers(bindData.providers);
+        BBDiag.stage("bind:patchAppBindData");
+        try {
+            ActivityThreadAppBindDataContext activityThreadAppBindData = BRActivityThreadAppBindData.get(boundApplication);
+            activityThreadAppBindData._set_instrumentationName(new ComponentName(bindData.appInfo.packageName, Instrumentation.class.getName()));
+            activityThreadAppBindData._set_appInfo(bindData.appInfo);
+            activityThreadAppBindData._set_info(bindData.info);
+            activityThreadAppBindData._set_processName(bindData.processName);
+            activityThreadAppBindData._set_providers(bindData.providers);
+        } catch (Throwable t) {
+            // AOSP changed AppBindData fields on recent SDKs. Keep going with our own copy.
+            BBDiag.trace("bind", "patch AppBindData failed: " + t);
+        }
 
         mBoundApplication = bindData;
 
         
-        if (BRNetworkSecurityConfigProvider.getRealClass() != null) {
-            Security.removeProvider("AndroidNSSP");
-            BRNetworkSecurityConfigProvider.get().install(packageContext);
+        try {
+            if (BRNetworkSecurityConfigProvider.getRealClass() != null) {
+                Security.removeProvider("AndroidNSSP");
+                BRNetworkSecurityConfigProvider.get().install(packageContext);
+            }
+        } catch (Throwable t) {
+            BBDiag.trace("bind", "NetworkSecurityConfigProvider install failed: " + t);
         }
+        BBDiag.stage("bind:makeApplication");
         Application application;
         try {
             onBeforeCreateApplication(packageName, processName, packageContext);
@@ -451,7 +561,9 @@ public class BActivityThread extends IBActivityThread.Stub {
                     Slog.w(TAG, "Creating minimal application context as fallback");
                     try {
                         
-                        application = (Application) packageContext;
+                        // A ContextImpl is NOT an Application; the old cast always threw
+                        // ClassCastException and turned a recoverable fallback into a crash.
+                        application = createMinimalApplication(packageContext, packageName);
                         if (application == null) {
                             Slog.e(TAG, "Even package context is null, this is critical");
                             throw new RuntimeException("Unable to create application context");
@@ -469,16 +581,57 @@ public class BActivityThread extends IBActivityThread.Stub {
             }
             
             mInitialApplication = application;
-            BRActivityThread.get(BlackBoxCore.mainThread())._set_mInitialApplication(mInitialApplication);
-            ContextCompat.fix((Context) BRActivityThread.get(BlackBoxCore.mainThread()).getSystemContext());
-            ContextCompat.fix(mInitialApplication);
-            installProviders(mInitialApplication, bindData.processName, bindData.providers);
+            try {
+                BRActivityThread.get(BlackBoxCore.mainThread())._set_mInitialApplication(mInitialApplication);
+            } catch (Throwable t) {
+                BBDiag.trace("bind", "_set_mInitialApplication failed: " + t);
+            }
+            try {
+                ContextCompat.fix((Context) BRActivityThread.get(BlackBoxCore.mainThread()).getSystemContext());
+            } catch (Throwable t) {
+                BBDiag.trace("bind", "fix systemContext failed: " + t);
+            }
+            try {
+                ContextCompat.fix(mInitialApplication);
+            } catch (Throwable t) {
+                BBDiag.trace("bind", "fix application context failed: " + t);
+            }
+            BBDiag.stage("bind:installProviders");
+            try {
+                installProviders(mInitialApplication, bindData.processName, bindData.providers);
+            } catch (Throwable t) {
+                BBDiag.crash(Thread.currentThread(), t);
+                BBDiag.trace("bind", "installProviders FAILED: " + t);
+            }
 
-            onBeforeApplicationOnCreate(packageName, processName, application);
-            AppInstrumentation.get().callApplicationOnCreate(application);
-            onAfterApplicationOnCreate(packageName, processName, application);
+            try {
+                onBeforeApplicationOnCreate(packageName, processName, application);
+            } catch (Throwable t) {
+                BBDiag.trace("bind", "onBeforeApplicationOnCreate failed: " + t);
+            }
+            BBDiag.stage("bind:application.onCreate");
+            try {
+                AppInstrumentation.get().callApplicationOnCreate(application);
+            } catch (Throwable t) {
+                // Target Application.onCreate (Hilt / Firebase / WorkManager init on heavy apps)
+                // is the most common crash on restricted containers. Persist it and keep the
+                // process alive so the Activity can still be created and the report read.
+                BBDiag.crash(Thread.currentThread(), t);
+                BBDiag.stage("bind:application_onCreate_FAILED " + t);
+                Slog.e(TAG, "target Application.onCreate failed (degraded)", t);
+            }
+            try {
+                onAfterApplicationOnCreate(packageName, processName, application);
+            } catch (Throwable t) {
+                BBDiag.trace("bind", "onAfterApplicationOnCreate failed: " + t);
+            }
 
-            HookManager.get().checkEnv(HCallbackProxy.class);
+            BBDiag.stage("bind:checkEnv");
+            try {
+                HookManager.get().checkEnv(HCallbackProxy.class);
+            } catch (Throwable t) {
+                BBDiag.trace("bind", "checkEnv failed: " + t);
+            }
         } catch (Exception e) {
             Slog.e(TAG, "Critical error in handleBindApplication", e);
             throw new RuntimeException("Unable to makeApplication", e);
@@ -1034,7 +1187,12 @@ public class BActivityThread extends IBActivityThread.Stub {
             }
         } finally {
             Binder.restoreCallingIdentity(origId);
-            ContentProviderDelegate.init();
+            try {
+                ContentProviderDelegate.init();
+            } catch (Throwable t) {
+                BBDiag.trace("bind", "ContentProviderDelegate.init failed: " + t);
+                Slog.w(TAG, "Error initializing ContentProviderDelegate: " + t);
+            }
         }
     }
 

@@ -15,6 +15,7 @@ import com.afollestad.materialdialogs.MaterialDialog
 import com.afollestad.materialdialogs.customview.customView
 import com.afollestad.materialdialogs.input.input
 import top.niunaijun.blackbox.BlackBoxCore
+import top.niunaijun.blackbox.utils.BBDiag
 import top.niunaijun.blackboxa.R
 import top.niunaijun.blackboxa.app.App
 import top.niunaijun.blackboxa.app.AppManager
@@ -106,6 +107,42 @@ class MainActivity : LoadingActivity() {
             UpdateManager.offerPendingInstall(this)
         } catch (e: Exception) {
             Log.e(TAG, "Error in update onResume: ${e.message}")
+        }
+        // A crash in a stub process is invisible without logcat. Surface its stack
+        // automatically when the user comes back to the host UI.
+        maybeShowCrashReport()
+    }
+
+    private fun maybeShowCrashReport() {
+        try {
+            val crashTime = BBDiag.lastCrashTime()
+            if (crashTime == 0L) return
+            val sp = getSharedPreferences("bb_diag_ui", Context.MODE_PRIVATE)
+            if (sp.getLong("shown_crash", 0L) == crashTime) return
+            sp.edit { putLong("shown_crash", crashTime) }
+            val pad = (12 * resources.displayMetrics.density).toInt()
+            val text = android.widget.TextView(this).apply {
+                text = "检测到上一次虚拟应用启动异常，以下为详细堆栈（可截图反馈）：\n\n" +
+                        BBDiag.crashReport()
+                textSize = 11f
+                setTextIsSelectable(true)
+                setTextColor(android.graphics.Color.parseColor("#FFDDDDDD"))
+                setBackgroundColor(android.graphics.Color.parseColor("#FF1A1A1A"))
+                typeface = android.graphics.Typeface.MONOSPACE
+                setPadding(pad, pad, pad, pad)
+            }
+            val scroll = android.widget.ScrollView(this).apply {
+                setBackgroundColor(android.graphics.Color.parseColor("#FF1A1A1A"))
+                addView(text)
+            }
+            MaterialDialog(this).show {
+                title(text = "虚拟应用崩溃记录")
+                customView(view = scroll, scrollable = true)
+                positiveButton(android.R.string.ok)
+                negativeButton(text = "清空记录") { BBDiag.clearCrash() }
+            }
+        } catch (t: Throwable) {
+            Log.e(TAG, "maybeShowCrashReport error: ${t.message}")
         }
     }
 
@@ -487,6 +524,9 @@ class MainActivity : LoadingActivity() {
             sb.append("\nlastLaunchError=").append(core.lastLaunchError).append("\n")
 
             val scrollView = android.widget.ScrollView(this).apply {
+                // Force a dark surface: the report is meant to be screenshotted, and the light
+                // theme would otherwise render the light-grey monospace text unreadable.
+                setBackgroundColor(android.graphics.Color.parseColor("#FF1A1A1A"))
                 addView(android.widget.TextView(this@MainActivity).apply {
                     text = sb.toString()
                     textSize = 12f

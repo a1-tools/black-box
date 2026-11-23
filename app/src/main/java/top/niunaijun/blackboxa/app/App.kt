@@ -5,6 +5,7 @@ import android.app.Application
 import android.content.Context
 import android.util.Log
 import top.niunaijun.blackbox.BlackBoxCore
+import top.niunaijun.blackbox.utils.BBDiag
 import top.niunaijun.blackboxa.update.UpdateManager
 
 
@@ -25,6 +26,14 @@ class App : Application() {
     override fun attachBaseContext(base: Context?) {
         try {
             super.attachBaseContext(base)
+
+            // Installed in every process of this APK (host, :black, :p0..:p49). A crash in a
+            // stub process is otherwise completely invisible without logcat.
+            try {
+                BBDiag.installCrashHandler(base)
+            } catch (t: Throwable) {
+                Log.e("App", "Error installing crash diagnostics: ${t.message}")
+            }
 
             try {
                 BlackBoxCore.get().closeCodeInit()

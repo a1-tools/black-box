@@ -37,6 +37,7 @@ import top.niunaijun.blackbox.core.system.pm.PackageManagerCompat;
 import top.niunaijun.blackbox.proxy.ProxyActivity;
 import top.niunaijun.blackbox.proxy.ProxyManifest;
 import top.niunaijun.blackbox.proxy.record.ProxyActivityRecord;
+import top.niunaijun.blackbox.utils.BBDiag;
 import top.niunaijun.blackbox.utils.ComponentUtils;
 import top.niunaijun.blackbox.utils.Slog;
 import top.niunaijun.blackbox.utils.compat.ActivityManagerCompat;
@@ -279,14 +280,31 @@ public class ActivityStack {
     private int startActivityInNewTaskLocked(int userId, Intent intent, ActivityInfo
             activityInfo, IBinder resultTo, int launchMode) {
         ActivityRecord record = newActivityRecord(intent, activityInfo, resultTo, userId);
-        Intent shadow = startActivityProcess(userId, intent, activityInfo, record);
+        Intent shadow;
+        try {
+            shadow = startActivityProcess(userId, intent, activityInfo, record);
+        } catch (Throwable t) {
+            BBDiag.crash(Thread.currentThread(), t);
+            BBDiag.stage("ams:startActivityProcess_FAILED " + t);
+            Slog.e(TAG, "startActivityProcess failed", t);
+            return 0;
+        }
 
         shadow.addFlags(Intent.FLAG_ACTIVITY_MULTIPLE_TASK);
         shadow.addFlags(Intent.FLAG_ACTIVITY_NEW_DOCUMENT);
         shadow.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
         shadow.addFlags(launchMode);
 
-        BlackBoxCore.getContext().startActivity(shadow);
+        BBDiag.trace("AMS", "shadow=" + shadow.getComponent()
+                + " target=" + intent.getComponent() + " pkg=" + activityInfo.packageName);
+        BBDiag.stage("ams:startActivity(shadow) " + shadow.getComponent());
+        try {
+            BlackBoxCore.getContext().startActivity(shadow);
+        } catch (Throwable t) {
+            BBDiag.crash(Thread.currentThread(), t);
+            BBDiag.stage("ams:startActivity_FAILED " + t);
+            Slog.e(TAG, "startActivity(shadow) failed", t);
+        }
         return 0;
     }
 

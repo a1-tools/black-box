@@ -79,7 +79,7 @@ import top.niunaijun.blackbox.utils.LogSender;
 public class BlackBoxCore extends ClientConfiguration {
     public static final String TAG = "BlackBoxCore";
     /** Bumped with every launch-fix build so an on-screen diagnostic identifies the installed APK. */
-    public static final String DIAG_BUILD = "bb-4.0.3-lazy-index";
+    public static final String DIAG_BUILD = "bb-4.0.4-crash-diag";
 
     private static final BlackBoxCore sBlackBoxCore = new BlackBoxCore();
     private static Context sContext;
@@ -1130,6 +1130,14 @@ public class BlackBoxCore extends ClientConfiguration {
     }
 
     public boolean launchApk(String packageName, int userId) {
+        // Start a fresh per-launch trace so a previous app's crash does not get misattributed.
+        try {
+            top.niunaijun.blackbox.utils.BBDiag.clearCrash();
+            top.niunaijun.blackbox.utils.BBDiag.trace("launch",
+                    "launchApk pkg=" + packageName + " user=" + userId);
+            top.niunaijun.blackbox.utils.BBDiag.stage("host:launchApk " + packageName);
+        } catch (Throwable ignored) {
+        }
         onBeforeMainLaunchApk(packageName, userId);
         mLastLaunchError = null;
         sLastLaunchStage = "intent";
@@ -1217,6 +1225,11 @@ public class BlackBoxCore extends ClientConfiguration {
         sb.append("hostInstalledApps: ").append(listHostAppCount()).append("\n");
         sb.append("launchTrace: ").append(getLaunchTrace()).append("\n");
         sb.append("lastLaunchError=").append(String.valueOf(mLastLaunchError)).append("\n");
+        try {
+            sb.append(top.niunaijun.blackbox.utils.BBDiag.digest());
+        } catch (Throwable t) {
+            sb.append("stubLog=ERROR ").append(t).append("\n");
+        }
         return sb.toString();
     }
 
@@ -1340,6 +1353,11 @@ public class BlackBoxCore extends ClientConfiguration {
                 top.niunaijun.blackbox.utils.compat.PackageParserFix
                         .getLastSource(packageName)).append("\n");
         sb.append("lastLaunchError=").append(String.valueOf(mLastLaunchError)).append("\n");
+        try {
+            sb.append(top.niunaijun.blackbox.utils.BBDiag.digest());
+        } catch (Throwable t) {
+            sb.append("stubLog=ERROR ").append(t).append("\n");
+        }
         return sb.toString();
     }
     public boolean isInstalled(String packageName, int userId) {

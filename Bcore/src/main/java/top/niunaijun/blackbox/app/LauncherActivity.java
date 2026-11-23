@@ -253,6 +253,9 @@ public class LauncherActivity extends Activity {
             text.setText(reason + "\n\n" + report);
             text.setTextIsSelectable(true);
             text.setTextSize(11f);
+            text.setTextColor(android.graphics.Color.parseColor("#FFDDDDDD"));
+            text.setBackgroundColor(android.graphics.Color.parseColor("#FF1A1A1A"));
+            text.setTypeface(android.graphics.Typeface.MONOSPACE);
             int pad = (int) (16 * getResources().getDisplayMetrics().density);
             text.setPadding(pad, pad / 2, pad, pad);
             scroll.addView(text);

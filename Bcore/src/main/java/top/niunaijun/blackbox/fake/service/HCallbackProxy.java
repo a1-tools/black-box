@@ -33,6 +33,7 @@ import top.niunaijun.blackbox.app.BActivityThread;
 import top.niunaijun.blackbox.fake.hook.IInjectHook;
 import top.niunaijun.blackbox.proxy.ProxyManifest;
 import top.niunaijun.blackbox.proxy.record.ProxyActivityRecord;
+import top.niunaijun.blackbox.utils.BBDiag;
 import top.niunaijun.blackbox.utils.Slog;
 import top.niunaijun.blackbox.utils.compat.BuildCompat;
 
@@ -40,8 +41,11 @@ import top.niunaijun.blackbox.utils.compat.BuildCompat;
 
 public class HCallbackProxy implements IInjectHook, Handler.Callback {
     public static final String TAG = "HCallbackStub";
+    /** A failed bind used to re-queue the same launch transaction forever -> ANR -> exit. */
+    private static final int MAX_REDIRECT = 12;
     private Handler.Callback mOtherCallback;
     private AtomicBoolean mBeing = new AtomicBoolean(false);
+    private int mRedirectCount = 0;
 
     private Handler.Callback getHCallback() {
         return BRHandler.get(getH()).mCallback();
@@ -69,35 +73,88 @@ public class HCallbackProxy implements IInjectHook, Handler.Callback {
 
     @Override
     public boolean handleMessage(@NonNull Message msg) {
-        if (!mBeing.getAndSet(true)) {
+        if (mBeing.getAndSet(true)) return false;
+        try {
+            boolean isLaunchMsg = false;
             try {
-                if (BuildCompat.isPie()) {
-                    if (msg.what == BRActivityThreadH.get().EXECUTE_TRANSACTION()) {
-                        if (handleLaunchActivity(msg.obj)) {
-                            getH().sendMessageAtFrontOfQueue(Message.obtain(msg));
-                            return true;
-                        }
-                    }
-                } else {
-                    if (msg.what == BRActivityThreadH.get().LAUNCH_ACTIVITY()) {
-                        if (handleLaunchActivity(msg.obj)) {
-                            getH().sendMessageAtFrontOfQueue(Message.obtain(msg));
-                            return true;
-                        }
-                    }
-                }
-                if (msg.what == BRActivityThreadH.get().CREATE_SERVICE()) {
-                    return handleCreateService(msg.obj);
-                }
-                if (mOtherCallback != null) {
-                    return mOtherCallback.handleMessage(msg);
-                }
-                return false;
-            } finally {
-                mBeing.set(false);
+                isLaunchMsg = BuildCompat.isPie()
+                        ? msg.what == BRActivityThreadH.get().EXECUTE_TRANSACTION()
+                        : msg.what == BRActivityThreadH.get().LAUNCH_ACTIVITY();
+            } catch (Throwable ignored) {
             }
+            if (!isLaunchMsg) {
+                // Hidden-API reflection can be blocked on SDK 36 / APK containers. If it is,
+                // the launch transaction is never rewritten and the system just starts the
+                // transparent stub Activity -> a white screen. AOSP has kept these H message
+                // ids unchanged since Android P, so use the literal values as a fallback.
+                final int EXECUTE_TRANSACTION = 159;
+                final int LAUNCH_ACTIVITY = 100;
+                isLaunchMsg = BuildCompat.isPie()
+                        ? msg.what == EXECUTE_TRANSACTION
+                        : msg.what == LAUNCH_ACTIVITY;
+                if (isLaunchMsg) {
+                    BBDiag.trace("HCallback", "launchMsg matched by literal H id fallback");
+                }
+            }
+            if (isLaunchMsg) {
+                BBDiag.trace("HCallback", "launchMsg what=" + msg.what
+                        + " appConfig=" + (BActivityThread.getAppConfig() != null)
+                        + " init=" + BActivityThread.currentActivityThread().isInit()
+                        + " redirect=" + mRedirectCount);
+                boolean needRedirect;
+                try {
+                    needRedirect = handleLaunchActivity(msg.obj);
+                } catch (Throwable t) {
+                    BBDiag.crash(Thread.currentThread(), t);
+                    BBDiag.stage("hook:handleLaunchActivity_exception " + t);
+                    Slog.e(TAG, "handleLaunchActivity crashed", t);
+                    needRedirect = false;
+                }
+                if (!needRedirect) {
+                    // Normal completion: the transaction now carries the real target intent.
+                    mRedirectCount = 0;
+                } else if (mRedirectCount++ < MAX_REDIRECT) {
+                    getH().sendMessageAtFrontOfQueue(Message.obtain(msg));
+                    return true;
+                } else {
+                    // Stop re-queueing. Previously an exception in bindApplication kept
+                    // isInit() false, so this message was re-queued forever: the main thread
+                    // spun, ANR fired, and the user saw a white screen then a silent exit.
+                    BBDiag.stage("hook:redirect_limit_reached");
+                    Slog.e(TAG, "redirect limit reached, stop re-queueing launch transaction");
+                }
+            }
+            boolean isCreateService = false;
+            try {
+                isCreateService = msg.what == BRActivityThreadH.get().CREATE_SERVICE();
+            } catch (Throwable ignored) {
+            }
+            if (!isCreateService) isCreateService = msg.what == 114; // AOSP H.CREATE_SERVICE
+            if (isCreateService) {
+                try {
+                    return handleCreateService(msg.obj);
+                } catch (Throwable t) {
+                    BBDiag.crash(Thread.currentThread(), t);
+                    BBDiag.stage("hook:handleCreateService_exception " + t);
+                }
+            }
+            if (mOtherCallback != null) {
+                return mOtherCallback.handleMessage(msg);
+            }
+            return false;
+        } catch (Throwable t) {
+            // Nothing may escape into ActivityThread.H: it kills the stub process main thread.
+            BBDiag.crash(Thread.currentThread(), t);
+            BBDiag.stage("hook:handleMessage_exception " + t);
+            Slog.e(TAG, "handleMessage crashed", t);
+            try {
+                if (mOtherCallback != null) return mOtherCallback.handleMessage(msg);
+            } catch (Throwable ignored) {
+            }
+            return false;
+        } finally {
+            mBeing.set(false);
         }
-        return false;
     }
 
     private Object getLaunchActivityItem(Object clientTransaction) {
@@ -146,7 +203,15 @@ public class HCallbackProxy implements IInjectHook, Handler.Callback {
         ActivityInfo activityInfo = stubRecord.mActivityInfo;
         if (activityInfo != null) {
             if (BActivityThread.getAppConfig() == null) {
-                BlackBoxCore.getBActivityManager().restartProcess(activityInfo.packageName, activityInfo.processName, stubRecord.mUserId);
+                BBDiag.stage("hook:restartProcess " + activityInfo.packageName);
+                try {
+                    BlackBoxCore.getBActivityManager().restartProcess(activityInfo.packageName, activityInfo.processName, stubRecord.mUserId);
+                } catch (Throwable t) {
+                    BBDiag.crash(Thread.currentThread(), t);
+                    BBDiag.stage("hook:restartProcess_FAILED " + t);
+                    Slog.e(TAG, "restartProcess failed", t);
+                    return false;
+                }
 
                 Intent launchIntentForPackage = BlackBoxCore.getBPackageManager().getLaunchIntentForPackage(activityInfo.packageName, stubRecord.mUserId);
                 intent.setExtrasClassLoader(this.getClass().getClassLoader());
@@ -164,11 +229,20 @@ public class HCallbackProxy implements IInjectHook, Handler.Callback {
             }
             
             if (!BActivityThread.currentActivityThread().isInit()) {
+                if (BActivityThread.currentActivityThread().hasBindFailed()) {
+                    // bindApplication already failed once; re-queuing would never change the
+                    // outcome. Let the system process the transaction instead of looping.
+                    BBDiag.stage("hook:bind_failed_skip");
+                    return false;
+                }
+                BBDiag.stage("hook:bindApplication " + activityInfo.packageName);
                 BActivityThread.currentActivityThread().bindApplication(activityInfo.packageName,
                         activityInfo.processName);
                 return true;
             }
 
+            BBDiag.stage("hook:replaceIntent "
+                    + (stubRecord.mTarget == null ? "NULL" : stubRecord.mTarget.getComponent()));
             int taskId = BRIActivityManager.get(BRActivityManagerNative.get().getDefault()).getTaskForActivity(token, false);
             BlackBoxCore.getBActivityManager().onActivityCreated(taskId, token, stubRecord.mActivityRecord);
 
