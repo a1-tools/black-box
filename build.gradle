@@ -12,8 +12,8 @@ ext {
     targetSdkVersion = 28  // Keep 28 intentionally — gives broader API access
 
     minSdk = 24  // Android 7.0 — min for test APK install; BlackBox Reborn targets API 34+
-    versionCode = 405
-    versionName = "4.0.5"
+    versionCode = 406
+    versionName = "4.0.6"
     xVersion = '1.1.0'
     hiddenApiBypass = '4.3'
 }

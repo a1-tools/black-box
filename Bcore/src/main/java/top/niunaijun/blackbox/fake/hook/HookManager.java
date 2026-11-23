@@ -36,6 +36,7 @@ import top.niunaijun.blackbox.fake.service.IFingerprintManagerProxy;
 import top.niunaijun.blackbox.fake.service.IGraphicsStatsProxy;
 import top.niunaijun.blackbox.fake.service.IJobServiceProxy;
 import top.niunaijun.blackbox.fake.service.ILauncherAppsProxy;
+import top.niunaijun.blackbox.fake.service.ILocaleManagerProxy;
 import top.niunaijun.blackbox.fake.service.ILocationManagerProxy;
 import top.niunaijun.blackbox.fake.service.IMediaRouterServiceProxy;
 import top.niunaijun.blackbox.fake.service.IMediaSessionManagerProxy;
@@ -169,6 +170,10 @@ public class HookManager {
             addInjector(new IContextHubServiceProxy());
             
             addInjector(new IVibratorServiceProxy());
+            // API 33+ per-app locales: the system server rejects a virtual package name with
+            // a SecurityException on a background thread (kills the guest). Self-disables on
+            // older releases where ILocaleManager does not exist.
+            addInjector(new ILocaleManagerProxy());
             addInjector(new IPersistentDataBlockServiceProxy());
             addInjector(AppInstrumentation.get());
             

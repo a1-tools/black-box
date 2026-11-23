@@ -348,10 +348,26 @@ public final class BBDiag {
         File d = dir();
         if (d == null) return "diagDir=UNAVAILABLE";
         StringBuilder sb = new StringBuilder();
-        sb.append("lastStage=").append(readTail(new File(d, STAGE), 512).trim()).append("\n\n");
         String crash = readTail(new File(d, CRASH), 6000).trim();
+        // crash.txt records the stage that was live when the process died. stage.txt is
+        // overwritten by every later launch, so preferring it here mixed a new launch's stage
+        // into an older crash report (same file, different pids and packages).
+        String stage = stageFromCrash(crash);
+        if (stage == null || stage.isEmpty()) {
+            stage = readTail(new File(d, STAGE), 512).trim();
+        }
+        sb.append("lastStage=").append(stage.isEmpty() ? "none" : stage).append("\n\n");
         sb.append(crash.isEmpty() ? "(no crash recorded)" : crash);
         return sb.toString();
+    }
+
+    /** Extracts the {@code stage: ...} line written by crash(), so it matches that crash. */
+    private static String stageFromCrash(String crash) {
+        if (crash == null) return null;
+        for (String line : crash.split("\n")) {
+            if (line.startsWith("stage: ")) return line.substring(7).trim();
+        }
+        return null;
     }
 
     /** A compact, screenshot-friendly digest appended to on-screen diagnostic reports. */
