@@ -42,6 +42,7 @@ public final class ApkManifestParser {
 
     private static final int TYPE_STRING = 0x03;
     private static final int TYPE_REFERENCE = 0x01;
+    private static final int TYPE_NULL = 0x00;
     private static final int TYPE_FLOAT = 0x04;
     private static final int TYPE_DIMENSION = 0x05;
     private static final int TYPE_FRACTION = 0x06;
@@ -306,7 +307,7 @@ public final class ApkManifestParser {
                             if (resource != null && !resource.isString() && resource.data != 0) {
                                 target.putInt(name, resource.data);
                             } else {
-                                putTypedValue(target, name, attrs.typed("android:value"));
+                                putTypedValue(target, name, attrs.typed("android:value"), data.apkPath);
                             }
                         }
                     }
@@ -346,7 +347,7 @@ public final class ApkManifestParser {
     }
 
     /** Mirrors android.content.pm.PackageParser#parseMetaData typed-value handling. */
-    private static void putTypedValue(Bundle bundle, String name, Attr v) {
+    private static void putTypedValue(Bundle bundle, String name, Attr v, String apkPath) {
         if (v == null) return;
         if (v.isString()) {
             bundle.putString(name, v.string);
@@ -354,12 +355,31 @@ public final class ApkManifestParser {
             bundle.putBoolean(name, v.data != 0);
         } else if (v.type == TYPE_FLOAT) {
             bundle.putFloat(name, Float.intBitsToFloat(v.data));
-        } else if (v.isIntLike() || v.type == TYPE_DIMENSION || v.type == TYPE_FRACTION) {
-            // TYPE_INT_DEC/HEX and TYPE_REFERENCE both carry their payload in data.
-            // aapt2 inlines @integer/google_play_services_version as TYPE_INT_HEX, so this is
-            // exactly the int that GMS expects from Bundle.getInt("com.google.android.gms.version").
+        } else if (v.type == TYPE_REFERENCE) {
+            // A manifest value such as @integer/google_play_services_version is stored as a
+            // reference. The platform resolves it, and SDKs depend on that: GMS compares
+            // com.google.android.gms.version against 12451000, not against 0x7f0a000f.
+            ApkResourceTable.Value resolved = ApkResourceTable.lookup(apkPath, v.data);
+            if (resolved != null && resolved.type != TYPE_NULL) {
+                if (resolved.type == TYPE_STRING && resolved.string != null) {
+                    bundle.putString(name, resolved.string);
+                    return;
+                }
+                if (resolved.isFloat()) {
+                    bundle.putFloat(name, Float.intBitsToFloat(resolved.data));
+                    return;
+                }
+                if (resolved.isBoolean()) {
+                    bundle.putBoolean(name, resolved.data != 0);
+                    return;
+                }
+                bundle.putInt(name, resolved.data);
+                return;
+            }
+            // Unresolvable (missing resource table): keep the raw id, same as before.
             bundle.putInt(name, v.data);
         } else {
+            // TYPE_INT_DEC/HEX, colors, dimensions and fractions all carry data as an int.
             bundle.putInt(name, v.data);
         }
     }
@@ -461,7 +481,7 @@ public final class ApkManifestParser {
         return map;
     }
 
-    private static String[] readStringPool(byte[] xml, int start, int size) {
+    static String[] readStringPool(byte[] xml, int start, int size) {
         if (start + 28 > xml.length) return new String[0];
         int count = u32(xml, start + 8);
         int flags = u32(xml, start + 16);
@@ -511,16 +531,16 @@ public final class ApkManifestParser {
         return pool;
     }
 
-    private static String str(String[] pool, int idx) {
+    static String str(String[] pool, int idx) {
         if (pool == null || idx < 0 || idx >= pool.length) return null;
         return pool[idx];
     }
 
-    private static int u16(byte[] b, int p) {
+    static int u16(byte[] b, int p) {
         return (b[p] & 0xff) | ((b[p + 1] & 0xff) << 8);
     }
 
-    private static int u32(byte[] b, int p) {
+    static int u32(byte[] b, int p) {
         return (b[p] & 0xff) | ((b[p + 1] & 0xff) << 8)
                 | ((b[p + 2] & 0xff) << 16) | ((b[p + 3] & 0xff) << 24);
     }

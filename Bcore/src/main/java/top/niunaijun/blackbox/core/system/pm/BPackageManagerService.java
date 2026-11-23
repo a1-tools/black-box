@@ -1114,7 +1114,7 @@ public class BPackageManagerService extends IBPackageManagerService.Stub impleme
                 pkg.mAppMetaData = fromAxml;
                 changed = true;
             } else {
-                changed = mergeMissingMetaData(pkg.mAppMetaData, fromAxml);
+                changed = mergeMetaData(pkg.mAppMetaData, fromAxml);
             }
             if (!changed) return false;
             if (pkg.applicationInfo != null) {
@@ -1134,25 +1134,55 @@ public class BPackageManagerService extends IBPackageManagerService.Stub impleme
         }
     }
 
-    /** Merge keys of {@code src} missing from {@code dst}; typed values keep their type. */
-    private static boolean mergeMissingMetaData(Bundle dst, Bundle src) {
+    /**
+     * Merge manifest-derived meta-data into a stored bundle. The manifest is authoritative: a
+     * record written by an older build may hold a resource id (0x7f......) where the resolved
+     * value (e.g. the GMS version code) belongs, so differing values must be replaced — not just
+     * missing keys added. The one exception keeps a previously resolved value when the manifest
+     * now yields an unresolved reference.
+     */
+    private static boolean mergeMetaData(Bundle dst, Bundle src) {
         boolean changed = false;
         for (String key : src.keySet()) {
-            if (dst.containsKey(key)) continue;
-            Object v = src.get(key);
-            if (v == null) continue;
-            if (v instanceof String) dst.putString(key, (String) v);
-            else if (v instanceof Integer) dst.putInt(key, (Integer) v);
-            else if (v instanceof Boolean) dst.putBoolean(key, (Boolean) v);
-            else if (v instanceof Float) dst.putFloat(key, (Float) v);
-            else if (v instanceof Long) dst.putLong(key, (Long) v);
-            else if (v instanceof Double) dst.putDouble(key, (Double) v);
-            else if (v instanceof Short) dst.putShort(key, (Short) v);
-            else if (v instanceof Byte) dst.putByte(key, (Byte) v);
-            else continue;
+            Object incoming = src.get(key);
+            if (incoming == null) continue;
+            Object existing = dst.get(key);
+            if (existing != null) {
+                if (existing.equals(incoming)) continue;
+                if (keepExisting(existing, incoming)) continue;
+            }
+            if (!putBundleValue(dst, key, incoming)) continue;
             changed = true;
         }
         return changed;
+    }
+
+    private static boolean keepExisting(Object existing, Object incoming) {
+        if (existing instanceof Integer && incoming instanceof Integer) {
+            int oldValue = (Integer) existing;
+            int newValue = (Integer) incoming;
+            // Never downgrade a resolved value back to an unresolved resource id.
+            return isResourceId(newValue) && !isResourceId(oldValue);
+        }
+        return false;
+    }
+
+    private static boolean isResourceId(int value) {
+        int pkgId = (value >>> 24) & 0xff;
+        return pkgId == 0x7f || pkgId == 0x01;
+    }
+
+    private static boolean putBundleValue(Bundle dst, String key, Object value) {
+        if (value instanceof String) dst.putString(key, (String) value);
+        else if (value instanceof Integer) dst.putInt(key, (Integer) value);
+        else if (value instanceof Boolean) dst.putBoolean(key, (Boolean) value);
+        else if (value instanceof Float) dst.putFloat(key, (Float) value);
+        else if (value instanceof Long) dst.putLong(key, (Long) value);
+        else if (value instanceof Double) dst.putDouble(key, (Double) value);
+        else if (value instanceof Short) dst.putShort(key, (Short) value);
+        else if (value instanceof Byte) dst.putByte(key, (Byte) value);
+        else return false;
+        return true;
     }
 
     @Override
