@@ -79,7 +79,7 @@ import top.niunaijun.blackbox.utils.LogSender;
 public class BlackBoxCore extends ClientConfiguration {
     public static final String TAG = "BlackBoxCore";
     /** Bumped with every launch-fix build so an on-screen diagnostic identifies the installed APK. */
-    public static final String DIAG_BUILD = "bb-4.0.1-axml-heal";
+    public static final String DIAG_BUILD = "bb-4.0.2-launch-diag";
 
     private static final BlackBoxCore sBlackBoxCore = new BlackBoxCore();
     private static Context sContext;
@@ -132,6 +132,29 @@ public class BlackBoxCore extends ClientConfiguration {
     /** Last launch failure reason, kept in memory so the UI can show it without logcat. */
     private volatile String mLastLaunchError = null;
     private boolean mIsSandboxedEnvironment = false;
+
+    /**
+     * Pipeline trace for the most recent launch attempt. These are static because the launch
+     * intent is created in the host process while the proxy activity runs in a stub process;
+     * keeping them here lets the on-screen diagnostic report show how far the launch got even
+     * when the user has no logcat access.
+     */
+    private static volatile String sLastLaunchStage = "none";
+    private static volatile String sLastResolvedActivity = "none";
+    private static volatile String sLastResolveCheck = "none";
+    private static volatile String sIndexRebuild = "not-run";
+
+    public static void recordLaunchStage(String stage) { sLastLaunchStage = stage; }
+    public static void recordResolvedActivity(String name) { sLastResolvedActivity = name; }
+    public static void recordResolveCheck(String result) { sLastResolveCheck = result; }
+    public static void recordIndexRebuild(String result) { sIndexRebuild = result; }
+
+    public static String getLaunchTrace() {
+        return "stage=" + sLastLaunchStage + " resolved=" + sLastResolvedActivity
+                + " resolveCheck=" + sLastResolveCheck + " index=" + sIndexRebuild;
+    }
+
+    public void setLastLaunchError(String reason) { mLastLaunchError = reason; }
 
     public static BlackBoxCore get() {
         return sBlackBoxCore;
@@ -1109,6 +1132,9 @@ public class BlackBoxCore extends ClientConfiguration {
     public boolean launchApk(String packageName, int userId) {
         onBeforeMainLaunchApk(packageName, userId);
         mLastLaunchError = null;
+        sLastLaunchStage = "intent";
+        sLastResolvedActivity = "none";
+        sLastResolveCheck = "none";
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
             if (!hasAllFilesAccess()) {
@@ -1144,12 +1170,15 @@ public class BlackBoxCore extends ClientConfiguration {
         if (launchIntentForPackage == null) {
             mLastLaunchError = "no_launch_intent"
                     + " (pkg=" + packageName + ", user=" + userId + ")";
+            sLastLaunchStage = "no_launch_intent";
             return false;
         }
         try {
+            sLastLaunchStage = "start_activity";
             startActivity(launchIntentForPackage, userId);
         } catch (Throwable t) {
             mLastLaunchError = "start_activity_exception: " + t;
+            sLastLaunchStage = "start_activity_exception";
             Slog.e(TAG, "startActivity threw", t);
             return false;
         }
@@ -1186,6 +1215,8 @@ public class BlackBoxCore extends ClientConfiguration {
             sb.append("users: ERROR ").append(t).append("\n");
         }
         sb.append("hostInstalledApps: ").append(listHostAppCount()).append("\n");
+        sb.append("launchTrace: ").append(getLaunchTrace()).append("\n");
+        sb.append("lastLaunchError=").append(String.valueOf(mLastLaunchError)).append("\n");
         return sb.toString();
     }
 
@@ -1287,6 +1318,13 @@ public class BlackBoxCore extends ClientConfiguration {
         } catch (Throwable t) {
             sb.append("  launchIntent: ERROR ").append(t).append("\n");
         }
+        sb.append("launchStage=").append(sLastLaunchStage).append("\n");
+        sb.append("resolvedActivity=").append(sLastResolvedActivity).append("\n");
+        sb.append("resolveCheck=").append(sLastResolveCheck).append("\n");
+        sb.append("indexRebuild=").append(sIndexRebuild).append("\n");
+        sb.append("launchIntentSource=").append(
+                top.niunaijun.blackbox.utils.compat.PackageParserFix
+                        .getLastSource(packageName)).append("\n");
         sb.append("lastLaunchError=").append(String.valueOf(mLastLaunchError)).append("\n");
         return sb.toString();
     }

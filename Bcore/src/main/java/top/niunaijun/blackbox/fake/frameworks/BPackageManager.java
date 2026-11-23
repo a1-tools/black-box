@@ -158,25 +158,7 @@ public class BPackageManager extends BlackManager<IBPackageManagerService> {
                 // intent straight from the host PM as a last resort.
                 return createExplicitLaunchIntentFromHost(packageName);
             }
-            String chosen = null;
-            // Prefer an exported activity that is not a tool/widget; otherwise take the first.
-            for (android.content.pm.ActivityInfo ai : info.activities) {
-                if (ai == null || ai.name == null) {
-                    continue;
-                }
-                if (ai.exported && chosen == null) {
-                    chosen = ai.name;
-                }
-                if (ai.name.toLowerCase().contains("main")
-                        || ai.name.toLowerCase().contains("launcher")) {
-                    chosen = ai.name;
-                    break;
-                }
-            }
-            if (chosen == null && info.activities.length > 0
-                    && info.activities[0] != null) {
-                chosen = info.activities[0].name;
-            }
+            String chosen = pickLauncherActivity(packageName, info.activities);
             if (chosen == null) {
                 return null;
             }
@@ -249,6 +231,56 @@ public class BPackageManager extends BlackManager<IBPackageManagerService> {
      * visible to the host PM) launchable on containers where getPackageArchiveInfo() returns
      * no components.
      */
+    /**
+     * Use the real MAIN/LAUNCHER activity from the APK binary manifest instead of guessing from
+     * class names. Guessing used to launch the first exported activity, which is often an
+     * internal screen that renders nothing - a black window with only the status bar. The
+     * manifest launcher is accepted only when the virtual component index contains that class,
+     * otherwise resolveActivity() would return null and the launch would silently fail.
+     */
+    private String pickLauncherActivity(String packageName,
+                                        android.content.pm.ActivityInfo[] activities) {
+        String manifestLauncher = null;
+        try {
+            File apk = BEnvironment.getBaseApkDir(packageName);
+            if (apk != null && apk.isFile()) {
+                top.niunaijun.blackbox.utils.compat.PackageParserFix.ComponentResult r =
+                        top.niunaijun.blackbox.utils.compat.PackageParserFix.resolveComponents(
+                                BlackBoxCore.getContext(), packageName, apk.getAbsolutePath(), null);
+                manifestLauncher = r.launcherActivity;
+            }
+        } catch (Throwable ignored) {
+        }
+        if (manifestLauncher != null) {
+            for (android.content.pm.ActivityInfo ai : activities) {
+                if (ai != null && manifestLauncher.equals(ai.name)) {
+                    Log.d(TAG, "Using manifest launcher " + ai.name + " for " + packageName);
+                    return ai.name;
+                }
+            }
+            Log.w(TAG, "Manifest launcher " + manifestLauncher
+                    + " is missing from the virtual component index for " + packageName);
+        }
+        String chosen = null;
+        for (android.content.pm.ActivityInfo ai : activities) {
+            if (ai == null || ai.name == null) {
+                continue;
+            }
+            if (ai.exported && chosen == null) {
+                chosen = ai.name;
+            }
+            if (ai.name.toLowerCase().contains("main")
+                    || ai.name.toLowerCase().contains("launcher")) {
+                chosen = ai.name;
+                break;
+            }
+        }
+        if (chosen == null && activities.length > 0 && activities[0] != null) {
+            chosen = activities[0].name;
+        }
+        return chosen;
+    }
+
     private Intent createExplicitLaunchIntentFromApk(String packageName) {
         try {
             File apk = BEnvironment.getBaseApkDir(packageName);

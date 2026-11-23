@@ -4,6 +4,7 @@ import android.app.Activity;
 import android.content.Intent;
 import android.os.Bundle;
 import android.util.Log;
+import android.widget.Toast;
 
 import androidx.annotation.Nullable;
 
@@ -23,17 +24,38 @@ public class ProxyActivity extends Activity {
     @Override
     protected void onCreate(@Nullable Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
-        Log.d(TAG, "onCreate");
-        finish();
+        try {
+            Log.d(TAG, "onCreate");
+            finish();
 
-        HookManager.get().checkEnv(HCallbackProxy.class);
+            HookManager.get().checkEnv(HCallbackProxy.class);
 
+            ProxyActivityRecord record = ProxyActivityRecord.create(getIntent());
+            if (record.mTarget != null) {
+                record.mTarget.setExtrasClassLoader(BlackBoxCore.getApplication().getClassLoader());
+                startActivity(record.mTarget);
+                return;
+            }
+            reportProxyFailure("target_intent_null", null);
+        } catch (Throwable t) {
+            reportProxyFailure("proxy_exception", t);
+        }
+    }
 
-        ProxyActivityRecord record = ProxyActivityRecord.create(getIntent());
-        if (record.mTarget != null) {
-            record.mTarget.setExtrasClassLoader(BlackBoxCore.getApplication().getClassLoader());
-            startActivity(record.mTarget);
-            return;
+    /**
+     * This runs in a stub (:pN) process, so an in-memory diagnostic written in the host
+     * process would not be visible. A Toast is the only feedback the user can screenshot.
+     */
+    private void reportProxyFailure(String reason, Throwable t) {
+        String msg = "虚拟启动失败 [" + reason + "]" + (t == null ? "" : ": " + t);
+        Log.e(TAG, msg, t);
+        try {
+            Toast.makeText(getApplicationContext(), msg, Toast.LENGTH_LONG).show();
+        } catch (Throwable ignored) {
+        }
+        try {
+            finish();
+        } catch (Throwable ignored) {
         }
     }
 

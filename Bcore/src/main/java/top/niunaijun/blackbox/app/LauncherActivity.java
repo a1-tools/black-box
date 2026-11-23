@@ -1,20 +1,27 @@
 package top.niunaijun.blackbox.app;
 
 import android.app.Activity;
+import android.app.AlertDialog;
 import android.content.Intent;
 import android.content.pm.PackageInfo;
 import android.content.pm.PackageManager;
+import android.content.pm.ResolveInfo;
 import android.graphics.drawable.Drawable;
 import android.os.Bundle;
+import android.os.Handler;
+import android.os.Looper;
 
 import androidx.annotation.Nullable;
 
 import top.niunaijun.blackbox.BlackBoxCore;
 import top.niunaijun.blackbox.R;
+import top.niunaijun.blackbox.core.system.pm.BPackageManagerService;
 import top.niunaijun.blackbox.utils.Slog;
 import android.util.Log;
 import android.widget.ImageView;
+import android.widget.ScrollView;
 import android.widget.TextView;
+import android.widget.Toast;
 import android.view.animation.OvershootInterpolator;
 
 
@@ -25,6 +32,8 @@ public class LauncherActivity extends Activity {
     public static final String KEY_PKG = "launch_pkg";
     public static final String KEY_USER_ID = "launch_user_id";
     private boolean isRunning = false;
+    private boolean mLaunchObserved = false;
+    private final Handler mHandler = new Handler(Looper.getMainLooper());
 
     public static void launch(Intent intent, int userId) {
         try {
@@ -133,7 +142,54 @@ public class LauncherActivity extends Activity {
             }
             
             
-            launchAppAsync(launchIntent, userId);
+            // Pre-flight check: ActivityStack.startActivityLocked() silently returns 0 when
+            // resolveActivity() finds no matching component. That leaves the user staring at a
+            // black window with only the status bar and no error at all. Verify the route here
+            // and, when it fails, show the full diagnostic on screen instead.
+            boolean routable = false;
+            try {
+                ResolveInfo resolved = BPackageManagerService.get().resolveActivity(
+                        launchIntent, PackageManager.GET_ACTIVITIES, null, userId);
+                if (resolved != null && resolved.activityInfo != null) {
+                    routable = true;
+                    BlackBoxCore.recordResolveCheck("OK " + resolved.activityInfo.name);
+                    BlackBoxCore.recordResolvedActivity(
+                            resolved.activityInfo.packageName + "/" + resolved.activityInfo.name);
+                    BlackBoxCore.recordLaunchStage("resolved");
+                } else {
+                    BlackBoxCore.recordResolveCheck("NULL");
+                    BlackBoxCore.recordLaunchStage("resolve_failed");
+                }
+            } catch (Throwable t) {
+                // A failure inside the pre-flight itself must not block a launch that could
+                // still succeed, so record it and continue with the real start.
+                BlackBoxCore.recordResolveCheck("EXCEPTION " + t);
+                routable = true;
+            }
+            if (!routable) {
+                String component = launchIntent.getComponent() == null ? "none"
+                        : launchIntent.getComponent().flattenToString();
+                BlackBoxCore.get().setLastLaunchError("resolve_activity_null (pkg=" + packageName
+                        + ", user=" + userId + ", component=" + component + ")");
+                showLaunchError(packageName, userId,
+                        "路由失败：虚拟框架找不到目标 Activity");
+                return;
+            }
+            launchAppAsync(launchIntent, userId, packageName);
+            // Watchdog: a successful route can still end in a black window if the stub process
+            // never mounts the target app. Record that state so the diagnostic report explains
+            // it instead of leaving the user with an unexplained black screen.
+            mHandler.postDelayed(() -> {
+                if (!mLaunchObserved && !isFinishing() && !isDestroyed()) {
+                    BlackBoxCore.recordLaunchStage("no_activity_window_8s");
+                    try {
+                        Toast.makeText(this,
+                                "启动后 8 秒仍未出现应用窗口，请打开诊断报告查看",
+                                Toast.LENGTH_LONG).show();
+                    } catch (Throwable ignored) {
+                    }
+                }
+            }, 8000);
             
         } catch (Exception e) {
             Slog.e(TAG, "Critical error in LauncherActivity.onCreate()", e);
@@ -184,38 +240,63 @@ public class LauncherActivity extends Activity {
     }
 
     
-    private void launchAppAsync(final Intent launchIntent, final int userId) {
+    private void launchAppAsync(final Intent launchIntent, final int userId,
+                                final String packageName) {
         new Thread(() -> {
             try {
                 Slog.d(TAG, "Starting app launch in background thread");
-                
-                
                 Thread.sleep(100);
-                
-                
+                BlackBoxCore.recordLaunchStage("stub_start");
                 BlackBoxCore.getBActivityManager().startActivity(launchIntent, userId);
-                
+                BlackBoxCore.recordLaunchStage("stub_started");
                 Slog.d(TAG, "App launch initiated successfully");
-            } catch (Exception e) {
+            } catch (Throwable e) {
                 Slog.e(TAG, "Error launching app", e);
-                
-                
-                runOnUiThread(() -> {
-                    try {
-                        
-                        Slog.e(TAG, "Failed to launch app: " + e.getMessage());
-                    } catch (Exception uiException) {
-                        Slog.e(TAG, "Error showing error message", uiException);
-                    }
-                });
+                BlackBoxCore.recordLaunchStage("stub_start_exception");
+                BlackBoxCore.get().setLastLaunchError("stub_start_exception: " + e);
+                runOnUiThread(() -> showLaunchError(packageName, userId,
+                        "启动虚拟 Activity 时抛出异常"));
             }
         }, "AppLaunchThread").start();
+    }
+
+    /**
+     * Show the reason plus the full framework diagnostic in a scrollable dialog.
+     * The user has no logcat access on this device, so a silent black screen is useless:
+     * anything that fails before the target Activity appears must be readable on screen.
+     */
+    private void showLaunchError(String packageName, int userId, String reason) {
+        try {
+            String report = BlackBoxCore.get().getDiagnosticReport(packageName, userId);
+            ScrollView scroll = new ScrollView(this);
+            TextView text = new TextView(this);
+            text.setText(reason + "\n\n" + report);
+            text.setTextIsSelectable(true);
+            text.setTextSize(11f);
+            int pad = (int) (16 * getResources().getDisplayMetrics().density);
+            text.setPadding(pad, pad / 2, pad, pad);
+            scroll.addView(text);
+            new AlertDialog.Builder(this)
+                    .setTitle("虚拟应用启动失败")
+                    .setView(scroll)
+                    .setPositiveButton("返回", (dialog, which) -> finish())
+                    .setCancelable(false)
+                    .show();
+        } catch (Throwable t) {
+            Slog.e(TAG, "Failed to show launch error", t);
+            try {
+                Toast.makeText(this, reason, Toast.LENGTH_LONG).show();
+            } catch (Throwable ignored) {
+            }
+            finish();
+        }
     }
 
     @Override
     protected void onPause() {
         super.onPause();
         isRunning = true;
+        mLaunchObserved = true;
     }
 
     @Override

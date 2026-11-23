@@ -1032,14 +1032,95 @@ public class BPackageManagerService extends IBPackageManagerService.Stub impleme
         // Repair any legacy/empty-component package before rebuilding the index below. This runs
         // on every framework start, so a user who only replaces the APK (without re-cloning)
         // still gets the old install records fixed automatically.
+        //
+        // Every package is isolated. Previously a single malformed legacy record threw out of
+        // this method and aborted index building for ALL packages; the Application swallows that
+        // exception, so the UI still opens but every resolveActivity() returns null and the user
+        // only sees a silent black screen. This is the first build that actually indexes the
+        // recovered AXML components, so the untested path matters here.
+        int failed = 0;
+        String firstError = null;
         synchronized (mPackages) {
             for (BPackageSettings value : mPackages.values()) {
-                ensureComponents(value);
+                try {
+                    ensureComponents(value);
+                } catch (Throwable t) {
+                    failed++;
+                    if (firstError == null) firstError = "repair " + packageLabel(value) + ": " + t;
+                    Slog.e(TAG, "ensureComponents crashed for " + packageLabel(value) + ": " + t);
+                }
             }
             for (BPackageSettings value : mPackages.values()) {
-                mComponentResolver.removeAllComponents(value.pkg);
-                mComponentResolver.addAllComponents(value.pkg);
+                try {
+                    if (value == null || value.pkg == null) continue;
+                    prepareForIndexing(value.pkg);
+                    mComponentResolver.removeAllComponents(value.pkg);
+                    mComponentResolver.addAllComponents(value.pkg);
+                } catch (Throwable t) {
+                    failed++;
+                    if (firstError == null) firstError = "index " + packageLabel(value) + ": " + t;
+                    Slog.e(TAG, "index rebuild failed for " + packageLabel(value) + ": " + t);
+                }
             }
+        }
+        BlackBoxCore.recordIndexRebuild(failed == 0
+                ? "OK packages=" + mPackages.size()
+                : "FAILED " + failed + " first=" + firstError);
+    }
+
+    private static String packageLabel(BPackageSettings ps) {
+        return ps == null || ps.pkg == null ? "?" : String.valueOf(ps.pkg.packageName);
+    }
+
+    /**
+     * The component resolver dereferences applicationInfo.processName, component.owner and
+     * component.intents. Recovered AXML components always set these, but records restored from
+     * an old package.conf may not, so normalise them before indexing.
+     */
+    private void prepareForIndexing(BPackage pkg) {
+        if (pkg.applicationInfo == null) {
+            ApplicationInfo ai = new ApplicationInfo();
+            ai.packageName = pkg.packageName;
+            ai.processName = pkg.packageName;
+            ai.sourceDir = pkg.baseCodePath;
+            ai.publicSourceDir = pkg.baseCodePath;
+            pkg.applicationInfo = ai;
+        }
+        ApplicationInfo ai = pkg.applicationInfo;
+        if (ai.packageName == null) ai.packageName = pkg.packageName;
+        if (ai.processName == null || ai.processName.isEmpty()) ai.processName = pkg.packageName;
+        sanitizeComponents(pkg.activities, pkg);
+        sanitizeComponents(pkg.receivers, pkg);
+        sanitizeComponents(pkg.services, pkg);
+        sanitizeComponents(pkg.providers, pkg);
+    }
+
+    @SuppressWarnings({"rawtypes", "unchecked"})
+    private void sanitizeComponents(java.util.List components, BPackage owner) {
+        if (components == null) return;
+        for (int i = components.size() - 1; i >= 0; i--) {
+            Object o = components.get(i);
+            if (!(o instanceof BPackage.Component)) {
+                components.remove(i);
+                continue;
+            }
+            BPackage.Component c = (BPackage.Component) o;
+            boolean hasInfo;
+            if (c instanceof BPackage.Activity) {
+                hasInfo = ((BPackage.Activity) c).info != null;
+            } else if (c instanceof BPackage.Service) {
+                hasInfo = ((BPackage.Service) c).info != null;
+            } else if (c instanceof BPackage.Provider) {
+                hasInfo = ((BPackage.Provider) c).info != null;
+            } else {
+                hasInfo = true;
+            }
+            if (c.className == null || !hasInfo) {
+                components.remove(i);
+                continue;
+            }
+            if (c.owner == null) c.owner = owner;
+            if (c.intents == null) c.intents = new ArrayList(0);
         }
     }
 }
