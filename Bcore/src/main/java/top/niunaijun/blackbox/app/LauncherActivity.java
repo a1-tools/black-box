@@ -225,7 +225,8 @@ public class LauncherActivity extends Activity {
         new Thread(() -> {
             try {
                 Slog.d(TAG, "Starting app launch in background thread");
-                Thread.sleep(100);
+                // No artificial delay: the old 100ms sleep was a splash workaround that added
+                // a fixed latency to every single virtual app launch.
                 BlackBoxCore.recordLaunchStage("stub_start");
                 BlackBoxCore.getBActivityManager().startActivity(launchIntent, userId);
                 BlackBoxCore.recordLaunchStage("stub_started");

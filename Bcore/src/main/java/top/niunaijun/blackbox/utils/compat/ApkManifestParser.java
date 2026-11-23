@@ -1,8 +1,10 @@
 package top.niunaijun.blackbox.utils.compat;
 
 import android.util.Log;
+import android.util.LruCache;
 
 import java.io.ByteArrayOutputStream;
+import java.io.File;
 import java.io.IOException;
 import java.io.InputStream;
 import java.util.ArrayList;
@@ -42,6 +44,28 @@ public final class ApkManifestParser {
     private static final int UTF8_FLAG = 0x00000100;
     private static final int NO_ENTRY = -1; // 0xFFFFFFFF as a signed int
 
+    /**
+     * A full AXML parse opens the APK zip, decodes the whole string pool and walks the chunk
+     * tree twice. Before this cache a single launch parsed the same manifest 2~3 times
+     * (prefetch + launcher fallback + on-screen diagnostics) and installs did it 3 times.
+     * Keyed by path + size + mtime so replacing the APK invalidates the entry automatically.
+     */
+    private static final LruCache<String, ManifestData> sCache = new LruCache<>(16);
+
+    /** Drop cached manifests, e.g. after an install/uninstall changes the stored APK. */
+    public static void clearCache() {
+        sCache.evictAll();
+    }
+
+    private static String cacheKey(String apkPath) {
+        try {
+            File f = new File(apkPath);
+            return apkPath + "|" + f.length() + "|" + f.lastModified();
+        } catch (Throwable t) {
+            return apkPath;
+        }
+    }
+
     private ApkManifestParser() {
     }
 
@@ -80,9 +104,12 @@ public final class ApkManifestParser {
         }
     }
 
-    /** Parse the manifest of an APK. Returns null when the APK has no readable manifest. */
+    /** Parse the manifest of an APK. Results are cached by path + size + mtime. */
     public static ManifestData parse(String apkPath) {
         if (apkPath == null) return null;
+        String key = cacheKey(apkPath);
+        ManifestData cached = sCache.get(key);
+        if (cached != null) return cached;
         byte[] xml;
         try {
             xml = readManifest(apkPath);
@@ -91,12 +118,17 @@ public final class ApkManifestParser {
             return null;
         }
         if (xml == null) return null;
+        ManifestData result;
         try {
-            return parseXml(xml, apkPath);
+            result = parseXml(xml, apkPath);
         } catch (Throwable t) {
             Log.w(TAG, "parseXml failed for " + apkPath + ": " + t);
             return null;
         }
+        if (result != null) {
+            sCache.put(key, result);
+        }
+        return result;
     }
 
     private static byte[] readManifest(String apkPath) throws IOException {

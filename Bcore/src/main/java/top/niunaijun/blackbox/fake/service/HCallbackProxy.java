@@ -97,10 +97,10 @@ public class HCallbackProxy implements IInjectHook, Handler.Callback {
                 }
             }
             if (isLaunchMsg) {
-                BBDiag.trace("HCallback", "launchMsg what=" + msg.what
-                        + " appConfig=" + (BActivityThread.getAppConfig() != null)
-                        + " init=" + BActivityThread.currentActivityThread().isInit()
-                        + " redirect=" + mRedirectCount);
+                // Do NOT trace every EXECUTE_TRANSACTION: on Android P+ that message id covers
+                // EVERY lifecycle transaction (resume/pause/stop/destroy), not just launches.
+                // The launch-specific trace lives in handleLaunchActivity(), after a real
+                // LaunchActivityItem has been found.
                 boolean needRedirect;
                 try {
                     needRedirect = handleLaunchActivity(msg.obj);
@@ -184,6 +184,11 @@ public class HCallbackProxy implements IInjectHook, Handler.Callback {
         }
         if (r == null)
             return false;
+        if (mRedirectCount == 0) {
+            BBDiag.trace("HCallback", "launchItem appConfig="
+                    + (BActivityThread.getAppConfig() != null)
+                    + " init=" + BActivityThread.currentActivityThread().isInit());
+        }
 
         Intent intent;
         IBinder token;

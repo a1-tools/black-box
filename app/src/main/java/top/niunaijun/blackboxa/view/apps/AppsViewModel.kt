@@ -5,6 +5,7 @@ import top.niunaijun.blackboxa.bean.AppInfo
 import top.niunaijun.blackboxa.data.AppsRepository
 import top.niunaijun.blackboxa.view.base.BaseViewModel
 import android.util.Log
+import android.os.SystemClock
 
 
 class AppsViewModel(private val repo: AppsRepository) : BaseViewModel() {
@@ -20,6 +21,9 @@ class AppsViewModel(private val repo: AppsRepository) : BaseViewModel() {
     
     val updateSortLiveData = MutableLiveData<Boolean>()
 
+    /** onStart() used to trigger two full enumerations (service callback + direct call). */
+    private var lastListLoadMs = 0L
+
     fun getInstalledApps(userId: Int) {
         launchOnUI {
             repo.getVmInstallList(userId, appsLiveData)
@@ -28,6 +32,12 @@ class AppsViewModel(private val repo: AppsRepository) : BaseViewModel() {
     
     
     fun getInstalledAppsWithRetry(userId: Int, maxRetries: Int = 3) {
+        val now = SystemClock.elapsedRealtime()
+        if (now - lastListLoadMs < 350L) {
+            Log.d("AppsViewModel", "skip duplicate app-list load")
+            return
+        }
+        lastListLoadMs = now
         var retryCount = 0
         
         fun attemptLoad() {

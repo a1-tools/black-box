@@ -9,6 +9,9 @@ import androidx.core.content.FileProvider
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.withContext
 import okhttp3.OkHttpClient
 import okhttp3.Request
@@ -107,18 +110,9 @@ object AppUpdate {
     // ---------------- 检查 ----------------
 
     suspend fun check(ignoredCode: Int?): Check = withContext(Dispatchers.IO) {
-        var firstError: String? = null
-        var newest: JSONObject? = null
-        for (url in manifestCandidates()) {
-            val (o, err) = fetchManifest(url)
-            if (o == null) {
-                if (err != null) firstError = firstError ?: err
-                continue
-            }
-            if (newest == null || o.optInt("versionCode", 0) > newest.optInt("versionCode", 0)) newest = o
-            // 代理之间版本可能不同步，但拿到一份比当前新的就够了，不必等齐所有镜像
-            if (o.optInt("versionCode", 0) > BuildConfig.VERSION_CODE) break
-        }
+        // Fire all mirrors concurrently instead of serially: previously one dead mirror could
+        // stall the whole check for its full timeout before the next one was even tried.
+        val (newest, firstError) = fetchManifestsFast(manifestCandidates())
         val o = newest ?: return@withContext Check(null, firstError)
         val code = o.optInt("versionCode", 0)
         if (code <= BuildConfig.VERSION_CODE) return@withContext Check(null, null)
@@ -143,6 +137,46 @@ object AppUpdate {
             mirrors = mirrors
         )
         if (!info.force && ignoredCode == code) Check(null, null) else Check(info, null)
+    }
+
+    /**
+     * 并发询问所有镜像，收到第一份「比当前版本新」的清单就取消其余请求。
+     * 串行时最坏要等 5 × callTimeout；并发后总耗时约等于最快可用的那个镜像。
+     */
+    private suspend fun fetchManifestsFast(urls: List<String>): Pair<JSONObject?, String?> = coroutineScope {
+        if (urls.isEmpty()) return@coroutineScope null to null
+        val channel = Channel<Pair<JSONObject?, String?>>(urls.size)
+        val jobs = urls.map { url ->
+            launch(Dispatchers.IO) {
+                val result = try {
+                    fetchManifest(url)
+                } catch (t: Throwable) {
+                    null to reason(t)
+                }
+                try {
+                    channel.send(result)
+                } catch (ignored: Throwable) {
+                    // channel already closed / job cancelled
+                }
+            }
+        }
+        var newest: JSONObject? = null
+        var firstError: String? = null
+        for (i in urls.indices) {
+            val (o, err) = channel.receive()
+            if (o != null) {
+                val best = newest
+                if (best == null || o.optInt("versionCode", 0) > best.optInt("versionCode", 0)) {
+                    newest = o
+                }
+                if ((newest?.optInt("versionCode", 0) ?: 0) > BuildConfig.VERSION_CODE) break
+            } else if (err != null && firstError == null) {
+                firstError = err
+            }
+        }
+        jobs.forEach { it.cancel() }
+        channel.close()
+        newest to firstError
     }
 
     private fun fetchManifest(url: String): Pair<JSONObject?, String?> = try {

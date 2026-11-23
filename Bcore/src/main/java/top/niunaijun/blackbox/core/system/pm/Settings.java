@@ -1,5 +1,6 @@
 package top.niunaijun.blackbox.core.system.pm;
 
+import android.content.pm.ApplicationInfo;
 import android.content.pm.PackageInfo;
 import android.content.pm.PackageManager;
 import android.content.pm.PackageParser;
@@ -178,22 +179,29 @@ import top.niunaijun.blackbox.utils.compat.PackageParserCompat;
     }
 
     public void scanPackage() {
-        synchronized (mPackages) {
-            File appRootDir = BEnvironment.getAppRootDir();
-            FileUtils.mkdirs(appRootDir);
-            File[] apps = appRootDir.listFiles();
-            for (File app : apps) {
-                if (!app.isDirectory()) {
-                    continue;
-                }
+        // Directory enumeration must not hold the package map lock: it used to block every
+        // Binder query for the whole duration of an N-package scan (with disk IO inside).
+        File appRootDir = BEnvironment.getAppRootDir();
+        FileUtils.mkdirs(appRootDir);
+        File[] apps = appRootDir.listFiles();
+        if (apps == null) return;
+        for (File app : apps) {
+            if (app.isDirectory()) {
                 scanPackage(app.getName());
             }
         }
     }
 
     public void scanPackage(String packageName) {
+        File app = BEnvironment.getAppDir(packageName);
+        // Guard against a host PACKAGE_ADDED/REMOVED broadcast for a package that was never
+        // cloned: scanning it would fall into the "bad Package" branch and delete its dir.
+        if (app == null || !app.isDirectory()
+                || !BEnvironment.getPackageConf(packageName).exists()) {
+            return;
+        }
         synchronized (mPackages) {
-            updatePackageLP(BEnvironment.getAppDir(packageName));
+            updatePackageLP(app);
         }
     }
 
@@ -217,11 +225,18 @@ import top.niunaijun.blackbox.utils.compat.PackageParserCompat;
                     BProcessManagerService.get().killAllByPackageName(bPackageSettings.pkg.packageName);
                     BPackageSettings newPkg = reInstallBySystem(packageInfo, bPackageSettings.installOption);
                     bPackageSettings.pkg = newPkg.pkg;
+                    bPackageSettings.save();
                 }
             } else {
-                bPackageSettings.pkg.applicationInfo = PackageManagerCompat.generateApplicationInfo(bPackageSettings.pkg, 0, BPackageUserState.create(), 0);
+                ApplicationInfo persistedAi = bPackageSettings.pkg.applicationInfo;
+                bPackageSettings.pkg.applicationInfo = PackageManagerCompat.generateApplicationInfo(
+                        bPackageSettings.pkg, 0, BPackageUserState.create(), 0);
+                // Rewriting package.conf on every scan costs a full Parcel serialize + disk
+                // write per package. Only a legacy record that had no ApplicationInfo needs it.
+                if (persistedAi == null && bPackageSettings.pkg.applicationInfo != null) {
+                    bPackageSettings.save();
+                }
             }
-            bPackageSettings.save();
             mPackages.put(bPackageSettings.pkg.packageName, bPackageSettings);
             Slog.d(TAG, "loaded Package: " + packageName);
         } catch (Throwable e) {

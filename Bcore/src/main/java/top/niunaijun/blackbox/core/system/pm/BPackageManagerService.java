@@ -15,6 +15,9 @@ import android.content.pm.ResolveInfo;
 import android.content.pm.ServiceInfo;
 import android.net.Uri;
 import android.os.Binder;
+import android.os.Handler;
+import android.os.HandlerThread;
+import android.os.Process;
 import android.os.RemoteException;
 import android.text.TextUtils;
 
@@ -79,8 +82,13 @@ public class BPackageManagerService extends IBPackageManagerService.Stub impleme
         filter.addAction("android.intent.action.PACKAGE_ADDED");
         filter.addAction("android.intent.action.PACKAGE_REMOVED");
         filter.addDataScheme("package");
-        BlackBoxCore.getContext()
-                .registerReceiver(mPackageChangedHandler, filter);
+        // Deliver package broadcasts on a background thread: a full scan used to run on the
+        // main thread and serialize every query behind the package map lock.
+        HandlerThread monitorThread =
+                new HandlerThread("bb-pkg-monitor", Process.THREAD_PRIORITY_BACKGROUND);
+        monitorThread.start();
+        BlackBoxCore.getContext().registerReceiver(mPackageChangedHandler, filter, null,
+                new Handler(monitorThread.getLooper()));
     }
 
     private final BroadcastReceiver mPackageChangedHandler = new BroadcastReceiver() {
@@ -89,7 +97,16 @@ public class BPackageManagerService extends IBPackageManagerService.Stub impleme
             String action = intent.getAction();
             if (!TextUtils.isEmpty(action)) {
                 if ("android.intent.action.PACKAGE_ADDED".equals(action) || "android.intent.action.PACKAGE_REMOVED".equals(action)) {
-                    mSettings.scanPackage();
+                    // A single host package event only needs the matching virtual record
+                    // re-scanned; a full N-package rescan is unnecessary.
+                    Uri data = intent.getData();
+                    String changed = data == null ? null : data.getSchemeSpecificPart();
+                    if (!TextUtils.isEmpty(changed)
+                            && BEnvironment.getPackageConf(changed).exists()) {
+                        mSettings.scanPackage(changed);
+                    } else {
+                        mSettings.scanPackage();
+                    }
                 }
             }
         }
@@ -394,21 +411,27 @@ public class BPackageManagerService extends IBPackageManagerService.Stub impleme
 
         
         synchronized (mPackages) {
-            ArrayList<PackageInfo> list;
-            list = new ArrayList<>(mPackages.size());
+            final int effectiveFlags = updateFlags(flags, userId);
+            ArrayList<PackageInfo> list = new ArrayList<>(mPackages.size());
             for (BPackageSettings ps : mPackages.values()) {
+                if (ps == null || ps.pkg == null) continue;
+                ensureComponents(ps);
 
 
 
 
 
 
-                PackageInfo pi = getPackageInfo(ps.pkg.packageName, flags, userId);
+                // Generate directly from the in-memory record. getPackageInfo() would redo
+                // sUserManager.exists, updateFlags, a map lookup and ensureComponents for
+                // every package, turning one list query into N redundant lookups.
+                PackageInfo pi = PackageManagerCompat.generatePackageInfo(
+                        ps, effectiveFlags, ps.readUserState(userId), userId);
                 if (pi != null) {
                     list.add(pi);
                 }
             }
-            return new ArrayList<>(list);
+            return list;
         }
     }
 
@@ -1054,18 +1077,9 @@ public class BPackageManagerService extends IBPackageManagerService.Stub impleme
 
     @Override
     public void systemReady() {
-        mSettings.scanPackage();
-        // Repair legacy/empty-component records, isolated per package so one malformed record
-        // cannot abort the whole pass.
-        synchronized (mPackages) {
-            for (BPackageSettings value : mPackages.values()) {
-                try {
-                    ensureComponents(value);
-                } catch (Throwable t) {
-                    Slog.e(TAG, "ensureComponents crashed for " + packageLabel(value) + ": " + t);
-                }
-            }
-        }
+        // Startup and lazy indexing now share ONE pass over the package map (scan -> repair ->
+        // prepare -> index). Previously startup did scan + repair + full rebuild = three full
+        // passes, all serialized behind the package map lock.
         ensureComponentIndex();
     }
 
@@ -1082,12 +1096,12 @@ public class BPackageManagerService extends IBPackageManagerService.Stub impleme
         if (mComponentIndexBuilt) return;
         synchronized (mPackages) {
             if (mComponentIndexBuilt) return;
-            if (mPackages.isEmpty()) {
-                try {
-                    mSettings.scanPackage();
-                } catch (Throwable t) {
-                    Slog.w(TAG, "lazy scanPackage failed: " + t);
-                }
+            // Exactly one scan per process: mComponentIndexBuilt guards this method, so neither
+            // systemReady() nor the lazy query path can trigger a redundant second scan.
+            try {
+                mSettings.scanPackage();
+            } catch (Throwable t) {
+                Slog.w(TAG, "scanPackage failed: " + t);
             }
             int failed = 0;
             int activities = 0;
@@ -1095,6 +1109,9 @@ public class BPackageManagerService extends IBPackageManagerService.Stub impleme
             for (BPackageSettings ps : mPackages.values()) {
                 try {
                     if (ps == null || ps.pkg == null) continue;
+                    // Repair legacy/empty-component records in the same pass, isolated per
+                    // package so one malformed record cannot abort the whole index build.
+                    ensureComponents(ps);
                     prepareForIndexing(ps.pkg);
                     mComponentResolver.removeAllComponents(ps.pkg);
                     mComponentResolver.addAllComponents(ps.pkg);

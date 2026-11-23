@@ -37,6 +37,24 @@ import top.niunaijun.blackbox.utils.compat.BuildCompat;
 @SuppressLint({"SdCardPath", "NewApi"})
 public class PackageManagerCompat {
 
+    /** Host ApplicationInfo is immutable for a given installed host APK; cache the Binder result. */
+    private static volatile ApplicationInfo sHostApplicationInfo;
+    /** The apache-legacy boot jar list only depends on the (static) system image. */
+    private static volatile String[] sSharedLibraryFiles;
+
+    private static ApplicationInfo hostApplicationInfo() {
+        ApplicationInfo info = sHostApplicationInfo;
+        if (info != null) return info;
+        try {
+            info = BlackBoxCore.getPackageManager()
+                    .getApplicationInfo(BlackBoxCore.getHostPkg(), 0);
+            sHostApplicationInfo = info;
+        } catch (Throwable e) {
+            return null;
+        }
+        return info;
+    }
+
     public static PackageInfo generatePackageInfo(BPackageSettings ps, int flags, BPackageUserState state, int userId) {
         if (ps == null) {
             return null;
@@ -189,10 +207,18 @@ public class PackageManagerCompat {
                 }
             }
         }
+        // Only consult the host PackageManager when signature data is actually requested;
+        // a plain component query no longer pays for this cross-process lookup.
         PackageInfo base = null;
-        try {
-            base = BlackBoxCore.getContext().getPackageManager().getPackageInfo(p.packageName, flags);
-        } catch (PackageManager.NameNotFoundException ignored) {
+        boolean needSignatures = (flags & PackageManager.GET_SIGNATURES) != 0
+                || (BuildCompat.isPie()
+                    && (flags & PackageManager.GET_SIGNING_CERTIFICATES) != 0);
+        if (needSignatures) {
+            try {
+                base = BlackBoxCore.getContext().getPackageManager()
+                        .getPackageInfo(p.packageName, flags);
+            } catch (PackageManager.NameNotFoundException ignored) {
+            }
         }
         if ((flags & PackageManager.GET_SIGNATURES) != 0) {
             if (base == null) {
@@ -282,10 +308,11 @@ public class PackageManagerCompat {
         if (!checkUseInstalledOrHidden(flags, state, p.applicationInfo)) {
             return null;
         }
-        ApplicationInfo baseApplication;
-        try {
-            baseApplication = BlackBoxCore.getPackageManager().getApplicationInfo(BlackBoxCore.getHostPkg(), flags);
-        } catch (Exception e) {
+        // Previously every generated component re-queried the host PackageManager over Binder
+        // (one full GET_ACTIVITIES|SERVICES|... query could issue 90+ calls). The host APK does
+        // not change while we are running, so one cached lookup is enough.
+        ApplicationInfo baseApplication = hostApplicationInfo();
+        if (baseApplication == null) {
             return null;
         }
         String sourceDir = p.baseCodePath;
@@ -346,22 +373,21 @@ public class PackageManagerCompat {
     private static void fixJar(ApplicationInfo info) {
         String APACHE_LEGACY_JAR = "/system/framework/org.apache.http.legacy.boot.jar";
         String APACHE_LEGACY_JAR_Q = "/system/framework/org.apache.http.legacy.jar";
-        Set<String> sharedLibraryFileList = new HashSet<>();
-        if (BuildCompat.isQ()) {
-            if (!FileUtils.isExist(APACHE_LEGACY_JAR_Q)) {
-                sharedLibraryFileList.add(APACHE_LEGACY_JAR);
-            } else {
-                sharedLibraryFileList.add(APACHE_LEGACY_JAR_Q);
+        String[] libs = sSharedLibraryFiles;
+        if (libs == null) {
+            String jar = APACHE_LEGACY_JAR;
+            if (BuildCompat.isQ() && FileUtils.isExist(APACHE_LEGACY_JAR_Q)) {
+                jar = APACHE_LEGACY_JAR_Q;
             }
-        } else {
-            sharedLibraryFileList.add(APACHE_LEGACY_JAR);
+            libs = new String[]{jar};
+            sSharedLibraryFiles = libs;
         }
 
 
 
 
 
-        info.sharedLibraryFiles = sharedLibraryFileList.toArray(new String[]{});
+        info.sharedLibraryFiles = libs.clone();
     }
 
     public static Resources getResources(Context context, ApplicationInfo appInfo) {
