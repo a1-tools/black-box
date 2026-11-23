@@ -70,6 +70,12 @@ public class BPackage implements Parcelable {
         pkg.packageName = pi.packageName;
         pkg.applicationInfo = pi.applicationInfo;
         pkg.baseCodePath = baseCodePath;
+        if (pi.applicationInfo != null && pi.applicationInfo.metaData != null) {
+            // GET_META_DATA is part of getComponentFlags(), but container PMs may omit it.
+            // generateApplicationInfo() reads pkg.mAppMetaData, not applicationInfo.metaData.
+            pkg.mAppMetaData = new Bundle(pi.applicationInfo.metaData);
+            pkg.applicationInfo.metaData = pkg.mAppMetaData;
+        }
         if (pi.versionName != null) {
             pkg.mVersionName = pi.versionName;
         }

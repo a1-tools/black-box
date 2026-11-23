@@ -10,6 +10,7 @@ import android.content.pm.ProviderInfo;
 import android.content.pm.ServiceInfo;
 import android.content.pm.Signature;
 import android.os.Build;
+import android.os.Bundle;
 import android.util.Log;
 
 import java.io.File;
@@ -284,6 +285,10 @@ public class PackageParserFix {
         if (appInfo.sourceDir == null) appInfo.sourceDir = manifest.apkPath;
         if (appInfo.publicSourceDir == null) appInfo.publicSourceDir = manifest.apkPath;
         if (appInfo.processName == null || appInfo.processName.isEmpty()) appInfo.processName = pkg;
+        Bundle appMetaData = manifest.getAppMetaData();
+        if (appMetaData != null && !appMetaData.isEmpty()) {
+            appInfo.metaData = new Bundle(appMetaData);
+        }
 
         PackageInfo pi = new PackageInfo();
         pi.packageName = pkg;
@@ -323,6 +328,7 @@ public class PackageParserFix {
         ai.exported = c.exported || !c.actions.isEmpty() || c.isLauncher();
         ai.enabled = true;
         ai.processName = c.processName;
+        ai.metaData = c.peekMetaData();
         return ai;
     }
 
@@ -335,6 +341,7 @@ public class PackageParserFix {
         si.exported = c.exported || !c.actions.isEmpty();
         si.enabled = true;
         si.processName = c.processName;
+        si.metaData = c.peekMetaData();
         return si;
     }
 
@@ -348,7 +355,27 @@ public class PackageParserFix {
         pi.exported = c.exported;
         pi.enabled = true;
         pi.processName = c.processName;
+        pi.metaData = c.peekMetaData();
         return pi;
+    }
+
+    /**
+     * Application-level {@code <meta-data>} read straight from the binary manifest. Used to heal
+     * packages whose stored record has no mAppMetaData (public PM parsers on API 33+ containers
+     * frequently drop it), which makes GMS/Firebase SDKs throw at Activity.onCreate.
+     */
+    public static Bundle readAppMetaData(String apkPath) {
+        if (!isReadableApk(apkPath)) return null;
+        try {
+            ApkManifestParser.ManifestData m = ApkManifestParser.parse(apkPath);
+            if (m == null) return null;
+            Bundle b = m.getAppMetaData();
+            // Never hand out the cached ManifestData bundle: callers may merge into it.
+            return b == null ? null : new Bundle(b);
+        } catch (Throwable t) {
+            Log.w(TAG, "readAppMetaData failed for " + apkPath + ": " + t);
+            return null;
+        }
     }
 
     /** Short AXML summary used by the on-screen diagnostic report. */

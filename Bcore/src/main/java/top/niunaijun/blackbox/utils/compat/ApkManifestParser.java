@@ -1,5 +1,6 @@
 package top.niunaijun.blackbox.utils.compat;
 
+import android.os.Bundle;
 import android.util.Log;
 import android.util.LruCache;
 
@@ -40,7 +41,15 @@ public final class ApkManifestParser {
     private static final int CHUNK_END_ELEMENT = 0x0103;
 
     private static final int TYPE_STRING = 0x03;
+    private static final int TYPE_REFERENCE = 0x01;
+    private static final int TYPE_FLOAT = 0x04;
+    private static final int TYPE_DIMENSION = 0x05;
+    private static final int TYPE_FRACTION = 0x06;
+    private static final int TYPE_INT_DEC = 0x10;
+    private static final int TYPE_INT_HEX = 0x11;
     private static final int TYPE_INT_BOOLEAN = 0x12;
+    private static final int TYPE_FIRST_COLOR_INT = 0x1c;
+    private static final int TYPE_LAST_COLOR_INT = 0x1f;
     private static final int UTF8_FLAG = 0x00000100;
     private static final int NO_ENTRY = -1; // 0xFFFFFFFF as a signed int
 
@@ -69,6 +78,53 @@ public final class ApkManifestParser {
     private ApkManifestParser() {
     }
 
+    /**
+     * One attribute with its original AXML type. {@code meta-data} needs the real type: a
+     * reference such as {@code @integer/google_play_services_version} is compiled by aapt2 to an
+     * int (or a TYPE_REFERENCE carrying the resource id) and GMS reads it back with
+     * {@code Bundle.getInt()}. Collapsing it to a String would make every GMS version check fail.
+     */
+    public static final class Attr {
+        public final int type;
+        public final int data;
+        public final String string;
+
+        Attr(int type, int data, String string) {
+            this.type = type;
+            this.data = data;
+            this.string = string;
+        }
+
+        boolean isString() {
+            return type == TYPE_STRING && string != null;
+        }
+
+        boolean isIntLike() {
+            return type == TYPE_REFERENCE
+                    || (type >= TYPE_INT_DEC && type <= TYPE_INT_BOOLEAN)
+                    || (type >= TYPE_FIRST_COLOR_INT && type <= TYPE_LAST_COLOR_INT);
+        }
+    }
+
+    /** Attribute set of one element: the legacy string view plus the typed view. */
+    public static final class Attributes {
+        private final Map<String, String> strings = new HashMap<>();
+        private final Map<String, Attr> typed = new HashMap<>();
+
+        public String get(String name) {
+            return strings.get(name);
+        }
+
+        public Attr typed(String name) {
+            return typed.get(name);
+        }
+
+        private void put(String key, String value, Attr attr) {
+            if (value != null) strings.put(key, value);
+            if (attr != null) typed.put(key, attr);
+        }
+    }
+
     public static final class ComponentData {
         public String type;            // activity / activity-alias / service / receiver / provider
         public String name;            // fully qualified class name
@@ -78,6 +134,18 @@ public final class ApkManifestParser {
         public String authority;
         public final ArrayList<String> actions = new ArrayList<>();
         public final ArrayList<String> categories = new ArrayList<>();
+        private Bundle metaData;
+
+        /** Lazily created component-level {@code <meta-data>} bundle. */
+        public Bundle metaData() {
+            if (metaData == null) metaData = new Bundle();
+            return metaData;
+        }
+
+        /** @return the bundle or null when the component declares no meta-data. */
+        public Bundle peekMetaData() {
+            return metaData;
+        }
 
         public boolean isLauncher() {
             return actions.contains(ACTION_MAIN) && categories.contains(CATEGORY_LAUNCHER);
@@ -92,6 +160,18 @@ public final class ApkManifestParser {
         public final ArrayList<ComponentData> services = new ArrayList<>();
         public final ArrayList<ComponentData> receivers = new ArrayList<>();
         public final ArrayList<ComponentData> providers = new ArrayList<>();
+        private Bundle appMetaData;
+
+        /** Lazily created application-level {@code <meta-data>} bundle. */
+        public Bundle appMetaData() {
+            if (appMetaData == null) appMetaData = new Bundle();
+            return appMetaData;
+        }
+
+        /** @return the application-level meta-data or null when the manifest has none. */
+        public Bundle getAppMetaData() {
+            return appMetaData;
+        }
 
         public boolean hasComponents() {
             return !activities.isEmpty() || !services.isEmpty()
@@ -199,7 +279,7 @@ public final class ApkManifestParser {
 
             if (type == CHUNK_START_ELEMENT && size >= 36) {
                 String tag = str(pool, u32(xml, p + 20));
-                Map<String, String> attrs = readAttributes(xml, pool, p, size);
+                Attributes attrs = readAttributes(xml, pool, p, size);
                 stack.add(tag == null ? "" : tag);
                 int depth = stack.size();
 
@@ -209,6 +289,27 @@ public final class ApkManifestParser {
                 } else if ("application".equals(tag)) {
                     inApplication = true;
                     applicationDepth = depth;
+                } else if ("meta-data".equals(tag)) {
+                    // GMS (and many SDKs) read meta-data at runtime through
+                    // getApplicationInfo(..., GET_META_DATA). On API 33+ container runtimes the
+                    // public PackageInfo carries no meta-data at all, so rebuild it from AXML.
+                    Bundle target = null;
+                    if (current != null && depth > currentDepth) {
+                        target = current.metaData();          // activity / service / receiver / provider
+                    } else if (inApplication && depth == applicationDepth + 1) {
+                        target = data.appMetaData();          // <application> direct child
+                    }
+                    if (target != null) {
+                        String name = attrs.get("android:name");
+                        if (name != null && !name.isEmpty()) {
+                            Attr resource = attrs.typed("android:resource");
+                            if (resource != null && !resource.isString() && resource.data != 0) {
+                                target.putInt(name, resource.data);
+                            } else {
+                                putTypedValue(target, name, attrs.typed("android:value"));
+                            }
+                        }
+                    }
                 } else if (inApplication && isComponentTag(tag)) {
                     ComponentData c = buildComponent(tag, attrs, data.packageName);
                     if (c != null && c.name != null) {
@@ -244,6 +345,25 @@ public final class ApkManifestParser {
         return data;
     }
 
+    /** Mirrors android.content.pm.PackageParser#parseMetaData typed-value handling. */
+    private static void putTypedValue(Bundle bundle, String name, Attr v) {
+        if (v == null) return;
+        if (v.isString()) {
+            bundle.putString(name, v.string);
+        } else if (v.type == TYPE_INT_BOOLEAN) {
+            bundle.putBoolean(name, v.data != 0);
+        } else if (v.type == TYPE_FLOAT) {
+            bundle.putFloat(name, Float.intBitsToFloat(v.data));
+        } else if (v.isIntLike() || v.type == TYPE_DIMENSION || v.type == TYPE_FRACTION) {
+            // TYPE_INT_DEC/HEX and TYPE_REFERENCE both carry their payload in data.
+            // aapt2 inlines @integer/google_play_services_version as TYPE_INT_HEX, so this is
+            // exactly the int that GMS expects from Bundle.getInt("com.google.android.gms.version").
+            bundle.putInt(name, v.data);
+        } else {
+            bundle.putInt(name, v.data);
+        }
+    }
+
     private static boolean isComponentTag(String tag) {
         return "activity".equals(tag) || "activity-alias".equals(tag)
                 || "service".equals(tag) || "receiver".equals(tag)
@@ -262,7 +382,7 @@ public final class ApkManifestParser {
         }
     }
 
-    private static ComponentData buildComponent(String tag, Map<String, String> attrs, String pkg) {
+    private static ComponentData buildComponent(String tag, Attributes attrs, String pkg) {
         ComponentData c = new ComponentData();
         c.type = tag;
         String raw = attrs.get("android:name");
@@ -297,9 +417,9 @@ public final class ApkManifestParser {
         return pkg == null ? null : pkg + "." + name;
     }
 
-    private static Map<String, String> readAttributes(byte[] xml, String[] pool,
-                                                      int chunkStart, int chunkSize) {
-        HashMap<String, String> map = new HashMap<>();
+    private static Attributes readAttributes(byte[] xml, String[] pool,
+                                             int chunkStart, int chunkSize) {
+        Attributes map = new Attributes();
         if (chunkStart + 36 > xml.length) return map;
         int attrStart = u16(xml, chunkStart + 24);
         int attrSize = u16(xml, chunkStart + 26);
@@ -319,8 +439,10 @@ public final class ApkManifestParser {
             if (attrName == null || attrName.isEmpty()) continue;
             String ns = (nsIdx == NO_ENTRY || nsIdx < 0) ? null : str(pool, nsIdx);
             String value;
+            String stringValue = null;
             if (dataType == TYPE_STRING) {
                 value = str(pool, data);
+                stringValue = value;
             } else if (rawIdx != NO_ENTRY && rawIdx >= 0) {
                 value = str(pool, rawIdx);
             } else if (dataType == TYPE_INT_BOOLEAN) {
@@ -329,10 +451,11 @@ public final class ApkManifestParser {
                 value = String.valueOf(data);
             }
             if (value == null) continue;
+            Attr attr = new Attr(dataType, data, stringValue);
             if (ANDROID_NS.equals(ns)) {
-                map.put("android:" + attrName, value);
+                map.put("android:" + attrName, value, attr);
             } else if (ns == null || ns.isEmpty()) {
-                map.put(attrName, value);
+                map.put(attrName, value, attr);
             }
         }
         return map;

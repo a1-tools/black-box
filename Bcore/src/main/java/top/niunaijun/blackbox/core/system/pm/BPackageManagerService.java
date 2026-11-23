@@ -15,6 +15,7 @@ import android.content.pm.ResolveInfo;
 import android.content.pm.ServiceInfo;
 import android.net.Uri;
 import android.os.Binder;
+import android.os.Bundle;
 import android.os.Handler;
 import android.os.HandlerThread;
 import android.os.Process;
@@ -69,6 +70,8 @@ public class BPackageManagerService extends IBPackageManagerService.Stub impleme
     final Object mInstallLock = new Object();
     /** Packages whose component repair was already attempted this process (avoids re-parsing APKs). */
     private final Set<String> mRepairAttempted = Collections.synchronizedSet(new HashSet<String>());
+    /** Packages whose meta-data repair was already attempted this process. */
+    private final Set<String> mMetaDataRepairAttempted = Collections.synchronizedSet(new HashSet<String>());
     /** The resolver index is built lazily because startup() may never run in APK containers. */
     private volatile boolean mComponentIndexBuilt = false;
 
@@ -124,11 +127,15 @@ public class BPackageManagerService extends IBPackageManagerService.Stub impleme
             return null;
         }
         flags = updateFlags(flags, userId);
-        
+
         synchronized (mPackages) {
-            
+
             BPackageSettings ps = mPackages.get(packageName);
             if (ps != null) {
+                // GMS / Firebase read <application> meta-data on first Activity.onCreate. Records
+                // persisted before the meta-data fix have mAppMetaData == null; repair on demand
+                // so a stored clone never crashes with GooglePlayServicesMissingManifestValueException.
+                ensureAppMetaData(ps);
                 BPackage p = ps.pkg;
                 return PackageManagerCompat.generateApplicationInfo(p, flags, ps.readUserState(userId), userId);
             }
@@ -1075,6 +1082,79 @@ public class BPackageManagerService extends IBPackageManagerService.Stub impleme
         }
     }
 
+    /**
+     * Idempotent self-heal for packages persisted without {@code <application>} meta-data.
+     *
+     * <p>GMS/Firebase SDKs read {@code com.google.android.gms.version} through
+     * {@code getApplicationInfo(pkg, GET_META_DATA)} during the first Activity.onCreate and
+     * throw {@code GooglePlayServicesMissingManifestValueException} when the bundle is null.
+     * On API 33+ container runtimes none of the public parse paths fill mAppMetaData, so it is
+     * recovered from the stored APK's binary manifest and merged into the existing record
+     * (never overwriting keys a real parse already produced). The result is persisted, so a
+     * user who only replaces the host APK — without re-cloning — is fixed automatically.</p>
+     */
+    boolean ensureAppMetaData(BPackageSettings ps) {
+        if (ps == null || ps.pkg == null) return false;
+        BPackage pkg = ps.pkg;
+        String pkgName = pkg.packageName;
+        if (TextUtils.isEmpty(pkgName) || Objects.equals(pkgName, BlackBoxCore.getHostPkg())) {
+            return false;
+        }
+        synchronized (mMetaDataRepairAttempted) {
+            if (mMetaDataRepairAttempted.contains(pkgName)) return false;
+            mMetaDataRepairAttempted.add(pkgName);
+        }
+        String apkPath = findApkPath(ps);
+        if (!PackageParserFix.isReadableApk(apkPath)) return false;
+        try {
+            Bundle fromAxml = PackageParserFix.readAppMetaData(apkPath);
+            if (fromAxml == null || fromAxml.isEmpty()) return false;
+            boolean changed;
+            if (pkg.mAppMetaData == null) {
+                pkg.mAppMetaData = fromAxml;
+                changed = true;
+            } else {
+                changed = mergeMissingMetaData(pkg.mAppMetaData, fromAxml);
+            }
+            if (!changed) return false;
+            if (pkg.applicationInfo != null) {
+                pkg.applicationInfo.metaData = pkg.mAppMetaData;
+            }
+            try {
+                ps.save();
+            } catch (Throwable t) {
+                Slog.w(TAG, "persist meta-data failed for " + pkgName + ": " + t);
+            }
+            Slog.d(TAG, "ensureAppMetaData: repaired " + pkgName
+                    + " keys=" + pkg.mAppMetaData.size() + " apk=" + apkPath);
+            return true;
+        } catch (Throwable t) {
+            Slog.e(TAG, "ensureAppMetaData failed for " + pkgName + ": " + t);
+            return false;
+        }
+    }
+
+    /** Merge keys of {@code src} missing from {@code dst}; typed values keep their type. */
+    private static boolean mergeMissingMetaData(Bundle dst, Bundle src) {
+        boolean changed = false;
+        for (String key : src.keySet()) {
+            if (dst.containsKey(key)) continue;
+            Object v = src.get(key);
+            if (v == null) continue;
+            if (v instanceof String) dst.putString(key, (String) v);
+            else if (v instanceof Integer) dst.putInt(key, (Integer) v);
+            else if (v instanceof Boolean) dst.putBoolean(key, (Boolean) v);
+            else if (v instanceof Float) dst.putFloat(key, (Float) v);
+            else if (v instanceof Long) dst.putLong(key, (Long) v);
+            else if (v instanceof Double) dst.putDouble(key, (Double) v);
+            else if (v instanceof Short) dst.putShort(key, (Short) v);
+            else if (v instanceof Byte) dst.putByte(key, (Byte) v);
+            else continue;
+            changed = true;
+        }
+        return changed;
+    }
+
     @Override
     public void systemReady() {
         // Startup and lazy indexing now share ONE pass over the package map (scan -> repair ->
@@ -1112,6 +1192,7 @@ public class BPackageManagerService extends IBPackageManagerService.Stub impleme
                     // Repair legacy/empty-component records in the same pass, isolated per
                     // package so one malformed record cannot abort the whole index build.
                     ensureComponents(ps);
+                    ensureAppMetaData(ps);
                     prepareForIndexing(ps.pkg);
                     mComponentResolver.removeAllComponents(ps.pkg);
                     mComponentResolver.addAllComponents(ps.pkg);
