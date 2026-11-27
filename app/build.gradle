@@ -75,6 +75,7 @@ dependencies {
     implementation libs.constraintlayout
     implementation libs.core.ktx
     testImplementation libs.junit
+    testImplementation 'org.json:json:20240303' // 单元测试里 android.jar 的 org.json 只是桩，换成真实实现
     androidTestImplementation libs.ext.junit
     androidTestImplementation libs.espresso.core
 

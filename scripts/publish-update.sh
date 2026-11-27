@@ -1,45 +1,57 @@
 #!/usr/bin/env bash
-# 发版辅助：为新版本生成 update/app-version.json。
+# 发版辅助：由打好的 release APK 生成 update/app-version.json（做法参照 tv 项目的 make-update-manifest.py）。
 #
 # 用法:
-#   ./scripts/publish-update.sh <versionName> <versionCode> <apkUrl> [apkFile]
+#   ./scripts/publish-update.sh <apkFile> <apkUrl> ["更新说明"]
 #
-# 示例（本地打好包后把 APK 传到 GitHub Release）:
-#   ./scripts/publish-update.sh 4.0.1 401 https://github.com/a1-tools/black-box/releases/download/v4.0.1/BlackBox_4.0.1_arm64-v8a-release.apk \
-#       app/build/outputs/apk/release/BlackBox_4.0.1_arm64-v8a-release.apk
+# 示例:
+#   ./gradlew :app:assembleRelease
+#   ./scripts/publish-update.sh app/build/outputs/apk/release/BlackBox_4.0.9_universal-release.apk \
+#       https://github.com/a1-tools/black-box/releases/download/v4.0.9/BlackBox_4.0.9_universal-release.apk "修复……"
 #
-# 生成后把 update/app-version.json 提交并推送到 main 分支，客户端即可收到更新。
+# versionCode / versionName 取自构建产物 app/build/outputs/apk/release/output-metadata.json，
+# sha256 / size 由 APK 算出（必填，不再允许留空），所以要发布的就是刚打出来的那一版。
+# 清单只有一个 url：设备可能是 32 位，建议发 universal 包；发单一 ABI 的包会给出警告。
+# 生成后把 APK 上传到 url、把 update/app-version.json 提交推送到 main，已安装的客户端下次检查即可收到更新。
 set -euo pipefail
 
-VER="${1:?用法: publish-update.sh <versionName> <versionCode> <apkUrl> [apkFile]}"
-CODE="${2:?缺少 versionCode}"
-URL="${3:?缺少 apkUrl}"
-APK="${4:-}"
+APK="${1:?用法: publish-update.sh <apkFile> <apkUrl> [更新说明]}"
+URL="${2:?缺少 apkUrl}"
+NOTES="${3:-修复已知问题，优化使用体验。}"
 
 cd "$(dirname "$0")/.."
+[ -f "$APK" ] || { echo "APK 不存在: $APK" >&2; exit 1; }
+case "$URL" in http://*|https://*) ;; *) echo "apkUrl 必须是 http(s) 地址: $URL" >&2; exit 1;; esac
 
-if [ -n "$APK" ]; then
-  [ -f "$APK" ] || { echo "APK 不存在: $APK"; exit 1; }
-  SIZE=$(stat -f%z "$APK" 2>/dev/null || stat -c%s "$APK")
-  SHA=$(shasum -a 256 "$APK" | awk '{print $1}')
-else
-  SIZE=0
-  SHA=""
-  echo "警告：未提供 APK 文件，sha256/size 留空（客户端将跳过大小与校验和检查，不建议）"
-fi
+TMP="$(mktemp)"
+trap 'rm -f "$TMP"' EXIT
+# 先写临时文件，生成成功才替换，失败时不会把现有清单截断成空文件
+python3 - "$APK" "$URL" "$NOTES" > "$TMP" <<'PY'
+import hashlib, json, os, sys
 
-cat > update/app-version.json <<EOF
-{
-  "versionCode": $CODE,
-  "versionName": "$VER",
-  "url": "$URL",
-  "sha256": "$SHA",
-  "size": $SIZE,
-  "notes": "修复已知问题，优化使用体验。",
-  "force": false
-}
-EOF
-
-echo "已生成 update/app-version.json"
-echo "记得把 notes 改成这次的更新说明，然后提交推送："
-echo "  git add update/app-version.json && git commit -m 'Release v$VER' && git push"
+apk, url, notes = sys.argv[1:4]
+meta_path = "app/build/outputs/apk/release/output-metadata.json"
+if not os.path.exists(meta_path):
+    sys.exit("找不到 %s：先 ./gradlew :app:assembleRelease" % meta_path)
+name = os.path.basename(apk)
+element = next((e for e in json.load(open(meta_path))["elements"] if e.get("outputFile") == name), None)
+if element is None:
+    sys.exit("构建信息里没有 %s：APK 不是最近一次 assembleRelease 的产物？" % name)
+if "universal" not in name:
+    print("警告：%s 不是 universal 包，另一种 ABI 的设备装不上" % name, file=sys.stderr)
+data = open(apk, "rb").read()
+print(json.dumps({
+    "versionCode": element["versionCode"],
+    "versionName": element["versionName"],
+    "url": url,
+    "sha256": hashlib.sha256(data).hexdigest(),
+    "size": len(data),
+    "notes": notes,
+    "force": False,
+}, ensure_ascii=False, indent=2))
+PY
+mv "$TMP" update/app-version.json
+trap - EXIT
+echo "已生成 update/app-version.json：" >&2
+cat update/app-version.json >&2
+echo "下一步：上传 APK 到 url，然后 git add update/app-version.json && git commit && git push" >&2

@@ -7,14 +7,18 @@ import android.net.Uri
 import android.provider.Settings
 import androidx.core.content.FileProvider
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.ensureActive
-import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
+import okhttp3.Call
 import okhttp3.OkHttpClient
 import okhttp3.Request
+import okhttp3.Response
 import org.json.JSONObject
 import top.niunaijun.blackboxa.BuildConfig
 import java.io.File
@@ -71,25 +75,35 @@ object AppUpdate {
     /** 默认源在 GitHub，国内直连不稳，同一份文件同时问几个代理，谁快用谁。 */
     private val MIRRORS: List<String> = mirrorsOf(GH_PROXY + GH_PATH)
 
+    private const val RELEASE_PREFIX = "https://github.com/"
+    private const val JSDELIVR_LIMIT = 20L * 1024 * 1024
+
     /**
-     * 把 GitHub raw 地址展开成「代理 → 直连」的候选列表，非 GitHub 地址原样返回。
-     * [size] 已知大小时用来跳过装不下大文件的线路（jsDelivr 单文件上限约 20MB）。
+     * 同一个 GitHub 文件经各个镜像的地址，顺序与参考项目 tv 一致：gh-proxy → ghfast → jsDelivr → 直连 → ghproxy.net。
+     * - raw 地址（含已套了 gh-proxy 的）：五条线路齐全；[size] 已知且超过 20MB 时跳过 jsDelivr（单文件上限）。
+     * - GitHub Releases 地址：jsDelivr 不托管 Release 附件，只有三个代理和直连。
+     * - 其它地址原样返回。
      */
-    private fun mirrorsOf(url: String, size: Long = -1L): List<String> {
+    fun mirrorsOf(url: String, size: Long = -1L): List<String> {
         val path = when {
             url.startsWith(GH_PROXY) -> url.removePrefix(GH_PROXY)
             url.startsWith(RAW_PREFIX) -> url.removePrefix(RAW_PREFIX)
+            url.startsWith(RELEASE_PREFIX) && "/releases/download/" in url -> {
+                return listOf(
+                    "https://gh-proxy.com/$url",
+                    "https://ghfast.top/$url",
+                    url,
+                    "https://ghproxy.net/$url"
+                )
+            }
             else -> return listOf(url)
         }
-        val out = mutableListOf(
-            GH_PROXY + path,
-            "https://ghfast.top/" + RAW_PREFIX + path,
-            "https://ghproxy.net/" + RAW_PREFIX + path,
-            RAW_PREFIX + path
-        )
-        if (size <= 0 || size <= 20L * 1024 * 1024) {
+        val out = mutableListOf(GH_PROXY + path, "https://ghfast.top/" + RAW_PREFIX + path)
+        if (size <= 0 || size <= JSDELIVR_LIMIT) {
             out.add("https://cdn.jsdelivr.net/gh/" + path.replaceFirst("/main/", "@main/"))
         }
+        out.add(RAW_PREFIX + path)
+        out.add("https://ghproxy.net/" + RAW_PREFIX + path)
         return out
     }
 
@@ -139,15 +153,24 @@ object AppUpdate {
         if (!info.force && ignoredCode == code) Check(null, null) else Check(info, null)
     }
 
+    /** 拿到第一份可用清单后，其余镜像再多等这么久：慢镜像可能给出更新的版本（有的镜像会缓存旧文件好几个小时）。 */
+    private const val GRACE_MS = 3_000L
+
     /**
-     * 并发询问所有镜像，收到第一份「比当前版本新」的清单就取消其余请求。
-     * 串行时最坏要等 5 × callTimeout；并发后总耗时约等于最快可用的那个镜像。
+     * 竞速请求跑在独立作用域里，不作为调用方协程的子任务：DNS 解析这类阻塞调用 Call.cancel() 打不断，
+     * 若放在 coroutineScope 里，调用方要等最慢（比如域名被墙、解析超时）的那条线路结束才能返回。
      */
-    private suspend fun fetchManifestsFast(urls: List<String>): Pair<JSONObject?, String?> = coroutineScope {
-        if (urls.isEmpty()) return@coroutineScope null to null
+    private val raceScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+
+    /**
+     * 并发询问所有镜像，取 versionCode 最高的那份清单：等到第一份可用的，再最多等 [GRACE_MS]，
+     * 之后取消还没回来的请求。404（该镜像没有清单）不算错误。
+     */
+    internal suspend fun fetchManifestsFast(urls: List<String>): Pair<JSONObject?, String?> {
+        if (urls.isEmpty()) return null to null
         val channel = Channel<Pair<JSONObject?, String?>>(urls.size)
         val jobs = urls.map { url ->
-            launch(Dispatchers.IO) {
+            raceScope.launch {
                 val result = try {
                     fetchManifest(url)
                 } catch (t: CancellationException) {
@@ -155,37 +178,27 @@ object AppUpdate {
                 } catch (t: Throwable) {
                     null to reason(t)
                 }
-                try {
-                    channel.send(result)
-                } catch (ignored: Throwable) {
-                    // channel already closed / job cancelled
-                }
+                channel.trySend(result)
             }
         }
         var newest: JSONObject? = null
         var firstError: String? = null
-        for (i in urls.indices) {
-            val (o, err) = channel.receive()
-            if (o != null) {
-                val best = newest
-                if (best == null || o.optInt("versionCode", 0) > best.optInt("versionCode", 0)) {
-                    newest = o
-                }
-                if ((newest?.optInt("versionCode", 0) ?: 0) > BuildConfig.VERSION_CODE) break
-            } else if (err != null && firstError == null) {
-                firstError = err
+        var answered = 0
+        while (answered < urls.size) {
+            val (o, err) = if (newest == null) channel.receive()
+            else (withTimeoutOrNull(GRACE_MS) { channel.receive() } ?: break)
+            answered++
+            if (o == null) {
+                if (err != null && firstError == null) firstError = err
+                continue
             }
+            if (newest == null || o.optInt("versionCode", 0) > newest.optInt("versionCode", 0)) newest = o
         }
         jobs.forEach { it.cancel() }
         channel.close()
-        newest to firstError
+        return newest to firstError
     }
 
-    /**
-     * 阻塞的 OkHttp 调用不会响应协程取消，coroutineScope 会一直等到它超时才返回，
-     * 「第一个够新的清单到手就收工」就白做了。这里挂一个取消回调，协程被取消时直接 cancel 掉 Call，
-     * 阻塞中的 execute() 会立刻抛 IOException 退出。
-     */
     private suspend fun fetchManifest(url: String): Pair<JSONObject?, String?> {
         val call = client.newBuilder().callTimeout(12, TimeUnit.SECONDS).build()
             .newCall(Request.Builder().url(url).header("User-Agent", UA).build())
@@ -258,63 +271,61 @@ object AppUpdate {
     /**
      * 下载到缓存目录并校验 sha256，失败抛带可读中文原因的异常。
      *
-     * 线路：清单里显式给的备用地址 + 直连 + 各代理，哪条先连上先用。
-     * 断点续传：上次留下的 `.part` 用 Range 请求接着下；这次下载中某条线路断流，已落盘的字节保留，
-     * 换下一条线路继续 Range；镜像忽略 Range 返回 200 时从头重下（摘要同步重置）。
+     * 与参考项目 tv 一致：所有线路（清单里的备用地址 + 直连 + 各代理）同时发请求，最先返回成功响应的那条下载，
+     * 其余立刻取消，所以走的是当下最快的线路。
+     * 断点续传：上次留下的 `.part` 用 Range 接着下，已有字节先算进摘要，校验仍覆盖整个文件；
+     * 镜像忽略 Range 返回 200 时从头重下；全部线路都回 416（残留不属于这个文件）时丢掉残留重来一次。
+     * 下到一半断流时，已落盘的字节保留并再选一次线路接着下，最多三轮，一轮都没推进就放弃。
      */
     suspend fun download(
         context: Context,
         info: Info,
         onProgress: (done: Long, total: Long) -> Unit
+    ): File = downloadTo(updatesDir(context), info, onProgress)
+
+    /** [download] 的实际实现，与 Context 解耦以便单元测试直接指定目录。 */
+    internal suspend fun downloadTo(
+        dir: File,
+        info: Info,
+        onProgress: (done: Long, total: Long) -> Unit
     ): File = withContext(Dispatchers.IO) {
-        val dir = updatesDir(context)
         val part = File(dir, "blackbox-${info.code}.apk.part")
         val file = File(dir, "blackbox-${info.code}.apk")
         dir.listFiles()?.forEach { if (it != part) it.delete() } // 其它版本、或上次校验失败的包
 
-        var have = part.length()
-        if (info.size > 0 && have > info.size) { // 残留比整包还大，不能用（刚好等于整包则直接走校验）
-            part.delete()
-            have = 0
-        }
+        if (info.size > 0 && part.length() > info.size) part.delete() // 残留比整包还大，不能用；刚好等于则直接校验
         val digest = MessageDigest.getInstance("SHA-256")
-        if (have > 0) part.inputStream().use { hashInto(digest, it) }
+        if (part.length() > 0) part.inputStream().use { hashInto(digest, it) }
 
-        val urls = info.candidates()
+        var rounds = 0
+        var restarted = false
         var lastError: String? = null
-        var completed = false
-        var round = 0
-        while (!completed && round < 2) { // 一轮走完所有线路还没下完，再来一轮（网络抖动）
-            round++
-            var progressed = false
-            for (u in urls) {
-                ensureActive()
-                val start = part.length()
-                if (info.size > 0 && start >= info.size) {
-                    completed = true
-                    break
+        while (true) {
+            ensureActive()
+            val start = part.length()
+            if (info.size > 0 && start >= info.size) break // 字节够了，进入校验
+            val response = try {
+                openFirst(info.candidates(), if (start > 0) mapOf("Range" to "bytes=$start-") else emptyMap(), start, info.size)
+            } catch (e: IllegalStateException) {
+                if (start > 0 && !restarted && e.message?.contains("416") == true) {
+                    restarted = true
+                    part.delete()
+                    digest.reset()
+                    continue
                 }
-                when (val r = streamTo(u, part, digest, start, info.size, onProgress)) {
-                    Attempt.Done -> {
-                        completed = true
-                        lastError = null
-                    }
-                    is Attempt.Partial -> {
-                        progressed = true // 断流也算推进，part 里多了一些字节
-                        lastError = r.reason
-                    }
-                    is Attempt.Failed -> lastError = r.reason
-                }
-                if (completed) break
+                throw e
             }
-            if (!progressed && !completed) break // 一条线路都没能推进，别空转
-        }
-        if (!completed) {
-            val saved = part.length()
-            throw IllegalStateException(
-                if (saved > 0) "网络不稳定，没有下完（${lastError ?: "所有线路都不通"}）"
-                else "下载失败（${lastError ?: "所有线路都连不上"}）"
-            )
+            var finished = response.use { r -> streamBody(r, part, digest, start, info.size, onProgress) { lastError = it } }
+            // 没有 Content-Length 的响应（分块 / 代理）被提前截断时读起来也是「正常结束」：长度不够不能算下完，
+            // 否则只会在最后校验失败、丢掉整个 .part
+            if (finished && info.size > 0 && part.length() < info.size) {
+                lastError = "数据不完整"
+                finished = false
+            }
+            if (finished) break
+            if (++rounds >= 3 || part.length() <= start) {
+                throw IllegalStateException("网络不稳定，没有下完（${lastError ?: "线路中断"}）")
+            }
         }
 
         val hex = digest.digest().joinToString("") { "%02x".format(it) }
@@ -326,15 +337,6 @@ object AppUpdate {
         file
     }
 
-    private sealed class Attempt {
-        /** 读到文件尾。 */
-        object Done : Attempt()
-        /** 中途断了，已写入的字节留在 .part 里。 */
-        class Partial(val reason: String) : Attempt()
-        /** 这条线路没打通，一个字节都没写。 */
-        class Failed(val reason: String) : Attempt()
-    }
-
     private fun hashInto(digest: MessageDigest, input: java.io.InputStream) {
         val buf = ByteArray(64 * 1024)
         while (true) {
@@ -344,65 +346,117 @@ object AppUpdate {
         }
     }
 
-    /** 用一条线路把 [part] 下到文件尾；[start] 是已有字节数，>0 时带 Range 续传。 */
-    private suspend fun streamTo(
-        url: String,
+    /**
+     * 响应像不像要下的安装包：错误页 / 限流页常常返回 200 + text/html，而且往往最快，竞速时会抢走第一名；
+     * 清单给了 size 时，响应体长度还必须等于整包（200）或剩余部分（206）。
+     */
+    private fun plausible(r: Response, start: Long, size: Long): Boolean {
+        if (r.header("Content-Type").orEmpty().lowercase().contains("text/html")) return false
+        val len = r.body?.contentLength() ?: -1L
+        if (size > 0 && len > 0 && len != size && len != size - start) return false
+        return true
+    }
+
+    /**
+     * 同时请求所有线路，第一个「可信」的成功响应胜出并取消其余请求，不等其余线路结束；全部失败时抛出带原因的异常
+     * （含最后一个 HTTP 状态码，调用方靠其中的 416 判断残留不可续传）。被取消时关掉所有请求，包括没人会读的胜出者。
+     */
+    private suspend fun openFirst(urls: List<String>, headers: Map<String, String>, start: Long, size: Long): Response {
+        val http = client.newBuilder()
+            .readTimeout(30, TimeUnit.SECONDS)
+            .callTimeout(0, TimeUnit.MILLISECONDS)
+            .build()
+        val calls = urls.map { u ->
+            http.newCall(
+                Request.Builder().url(u).header("User-Agent", UA)
+                    .apply { headers.forEach { (k, v) -> header(k, v) } }.build()
+            )
+        }
+        val answers = Channel<Pair<Call, Response?>>(calls.size)
+        val decided = java.util.concurrent.atomic.AtomicBoolean(false)
+        calls.forEach { call ->
+            raceScope.launch {
+                val r = runCatching { call.execute() }.getOrNull()
+                // 比赛已经有结果：迟到的响应直接关掉，不再有人收
+                if (r != null && decided.get()) r.close() else answers.trySend(call to r)
+            }
+        }
+        var winner: Response? = null
+        var lastCode = 0
+        var rejected = false
+        try {
+            var left = calls.size
+            while (left > 0 && winner == null) {
+                val (call, r) = answers.receive()
+                left--
+                if (r == null) continue
+                if (r.isSuccessful && plausible(r, start, size)) {
+                    winner = r
+                    calls.forEach { other -> if (other !== call) other.cancel() }
+                } else {
+                    if (r.isSuccessful) rejected = true else lastCode = r.code
+                    r.close()
+                }
+            }
+        } catch (e: CancellationException) {
+            calls.forEach { it.cancel() }
+            winner?.close()
+            throw e
+        } finally {
+            decided.set(true)
+            while (true) { // 已入队但没人收的响应也要关掉
+                val late = answers.tryReceive().getOrNull() ?: break
+                late.second?.close()
+            }
+            answers.close()
+        }
+        return winner ?: throw IllegalStateException(
+            "下载失败（" + when {
+                lastCode > 0 -> "HTTP $lastCode"
+                rejected -> "线路返回的不是安装包"
+                else -> "所有线路都连不上"
+            } + "）"
+        )
+    }
+
+    /** 把响应体写进 [part]；读到文件尾返回 true，中途 IO 异常返回 false（已写入的字节保留）。 */
+    private suspend fun streamBody(
+        r: Response,
         part: File,
         digest: MessageDigest,
         start: Long,
         size: Long,
-        onProgress: (done: Long, total: Long) -> Unit
-    ): Attempt {
-        val req = Request.Builder().url(url).header("User-Agent", UA)
-            .apply { if (start > 0) header("Range", "bytes=$start-") }
-            .build()
-        val resp = try {
-            client.newBuilder()
-                .readTimeout(30, TimeUnit.SECONDS)
-                .callTimeout(0, TimeUnit.MILLISECONDS)
-                .build()
-                .newCall(req).execute()
-        } catch (e: Exception) {
-            return Attempt.Failed(reason(e))
-        }
-
-        resp.use { r ->
-            if (!r.isSuccessful && r.code != 206) {
-                // 416：服务端认为续传位置不合法，丢掉残留从头来
-                if (r.code == 416 && start > 0) {
-                    part.delete()
-                    return Attempt.Failed("续传位置无效，已丢弃残留")
-                }
-                return Attempt.Failed("HTTP ${r.code}")
-            }
-            val body = r.body ?: return Attempt.Failed("下载失败：没有内容")
-            val resuming = start > 0 && r.code == 206
-            if (!resuming) digest.reset() // 线路不支持 Range，整包重下
-            var done = if (resuming) start else 0L
-            val total = body.contentLength().takeIf { it > 0 }?.plus(done) ?: size
-            try {
-                body.byteStream().use { input ->
-                    java.io.FileOutputStream(part, resuming).use { out ->
-                        val buf = ByteArray(64 * 1024)
+        onProgress: (done: Long, total: Long) -> Unit,
+        onError: (String) -> Unit
+    ): Boolean {
+        val body = r.body ?: throw IllegalStateException("下载失败：没有内容")
+        val resuming = start > 0 && r.code == 206
+        if (!resuming) digest.reset() // 线路不支持 Range，整包重下
+        var done = if (resuming) start else 0L
+        val total = body.contentLength().takeIf { it > 0 }?.plus(done) ?: size
+        try {
+            body.byteStream().use { input ->
+                java.io.FileOutputStream(part, resuming).use { out ->
+                    val buf = ByteArray(64 * 1024)
+                    onProgress(done, total)
+                    while (true) {
+                        coroutineContext.ensureActive()
+                        val n = input.read(buf)
+                        if (n < 0) break
+                        out.write(buf, 0, n)
+                        digest.update(buf, 0, n)
+                        done += n
                         onProgress(done, total)
-                        while (true) {
-                            coroutineContext.ensureActive()
-                            val n = input.read(buf)
-                            if (n < 0) break
-                            out.write(buf, 0, n)
-                            digest.update(buf, 0, n)
-                            done += n
-                            onProgress(done, total)
-                        }
                     }
                 }
-            } catch (e: CancellationException) {
-                throw e
-            } catch (e: Exception) {
-                return Attempt.Partial(reason(e))
             }
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            onError(reason(e))
+            return false
         }
-        return Attempt.Done
+        return true
     }
 
     // ---------------- 安装 ----------------
