@@ -90,9 +90,9 @@ public final class ApkResourceTable {
      */
     public static Value lookup(String apkPath, int resId) {
         if (apkPath == null || resId == 0) return null;
-        byte[] table;
+        Table table;
         try {
-            table = readResourceTable(apkPath);
+            table = loadTable(apkPath);
         } catch (Throwable t) {
             Log.w(TAG, "read resources.arsc failed for " + apkPath + ": " + t);
             return null;
@@ -104,6 +104,47 @@ public final class ApkResourceTable {
             Log.w(TAG, "lookup 0x" + Integer.toHexString(resId) + " failed: " + t);
             return null;
         }
+    }
+
+    /**
+     * One APK's resources.arsc plus its lazily decoded global string pool. A manifest with several
+     * {@code @ref} meta-data used to re-read the whole table (often MBs) and re-decode the pool
+     * (up to 200k strings) for every single reference, although integers never need the pool.
+     */
+    private static final class Table {
+        final String key;
+        final byte[] data;
+        private int poolStart = -1;
+        private int poolSize;
+        private String[] pool;
+
+        Table(String key, byte[] data) {
+            this.key = key;
+            this.data = data;
+        }
+
+        synchronized String string(int index) {
+            if (pool == null) {
+                pool = poolStart < 0 ? new String[0]
+                        : ApkManifestParser.readStringPool(data, poolStart, poolSize);
+            }
+            return ApkManifestParser.str(pool, index);
+        }
+    }
+
+    /** Last table only, softly held: it is large and only needed while one manifest is parsed. */
+    private static java.lang.ref.SoftReference<Table> sLast;
+
+    private static synchronized Table loadTable(String apkPath) throws IOException {
+        java.io.File f = new java.io.File(apkPath);
+        String key = apkPath + "|" + f.length() + "|" + f.lastModified();
+        Table cached = sLast == null ? null : sLast.get();
+        if (cached != null && cached.key.equals(key)) return cached;
+        byte[] bytes = readResourceTable(apkPath);
+        if (bytes == null) return null;
+        Table t = new Table(key, bytes);
+        sLast = new java.lang.ref.SoftReference<>(t);
+        return t;
     }
 
     private static byte[] readResourceTable(String apkPath) throws IOException {
@@ -131,15 +172,15 @@ public final class ApkResourceTable {
         }
     }
 
-    private static Value lookupInternal(byte[] arsc, int resId, int depth) {
-        if (arsc == null || depth <= 0) return null;
+    private static Value lookupInternal(Table table, int resId, int depth) {
+        if (table == null || depth <= 0) return null;
+        byte[] arsc = table.data;
         if (arsc.length < 12 || ApkManifestParser.u16(arsc, 0) != CHUNK_TABLE) return null;
         int total = Math.min(ApkManifestParser.u32(arsc, 4), arsc.length);
         int pkgId = (resId >>> 24) & 0xff;
         int typeId = (resId >>> 16) & 0xff;
         int entryIdx = resId & 0xffff;
 
-        String[] globalPool = null;
         int p = ApkManifestParser.u16(arsc, 2);
         if (p < 8) p = 8;
         while (p + 8 <= total) {
@@ -148,14 +189,18 @@ public final class ApkResourceTable {
             int size = ApkManifestParser.u32(arsc, p + 4);
             if (size < 8 || headerSize < 8 || (long) p + size > total) break;
             if (type == CHUNK_STRING_POOL) {
-                if (globalPool == null) {
-                    globalPool = ApkManifestParser.readStringPool(arsc, p, size);
+                if (table.poolStart < 0) { // 只记位置，真正需要字符串时才解码
+                    table.poolStart = p;
+                    table.poolSize = size;
                 }
             } else if (type == CHUNK_PACKAGE) {
-                Value v = lookupInPackage(arsc, p, size, pkgId, typeId, entryIdx, globalPool);
+                Value v = lookupInPackage(arsc, p, size, pkgId, typeId, entryIdx);
                 if (v != null) {
+                    if (v.type == TYPE_STRING) {
+                        v = new Value(v.type, v.data, table.string(v.data));
+                    }
                     if (v.type == TYPE_REFERENCE && depth > 1) {
-                        Value target = lookupInternal(arsc, v.data, depth - 1);
+                        Value target = lookupInternal(table, v.data, depth - 1);
                         if (target != null) return target;
                     }
                     return v;
@@ -167,8 +212,7 @@ public final class ApkResourceTable {
     }
 
     private static Value lookupInPackage(byte[] arsc, int start, int size,
-                                         int pkgId, int typeId, int entryIdx,
-                                         String[] globalPool) {
+                                         int pkgId, int typeId, int entryIdx) {
         if (start + 288 > arsc.length) return null;
         if (ApkManifestParser.u32(arsc, start + 8) != pkgId) return null;
         int headerSize = ApkManifestParser.u16(arsc, start + 2);
@@ -182,7 +226,7 @@ public final class ApkResourceTable {
             int chunkSize = ApkManifestParser.u32(arsc, p + 4);
             if (chunkSize < 8 || chunkHeader < 8 || (long) p + chunkSize > end) break;
             if (type == CHUNK_TYPE) {
-                Value v = valueFromTypeChunk(arsc, p, chunkSize, typeId, entryIdx, globalPool);
+                Value v = valueFromTypeChunk(arsc, p, chunkSize, typeId, entryIdx);
                 if (v != null) {
                     // Prefer the default configuration; keep the first match as a fallback.
                     if (isDefaultConfig(arsc, p)) return v;
@@ -205,7 +249,7 @@ public final class ApkResourceTable {
     }
 
     private static Value valueFromTypeChunk(byte[] arsc, int start, int size,
-                                            int typeId, int entryIdx, String[] globalPool) {
+                                            int typeId, int entryIdx) {
         int type = arsc[start + 8] & 0xff;
         if (type != typeId) return null;
         int flags = arsc[start + 9] & 0xff;
@@ -244,8 +288,6 @@ public final class ApkResourceTable {
         int dataType = arsc[valuePos + 3] & 0xff;
         int data = ApkManifestParser.u32(arsc, valuePos + 4);
         if (dataType == TYPE_NULL) return null;
-        String string = dataType == TYPE_STRING && globalPool != null
-                ? ApkManifestParser.str(globalPool, data) : null;
-        return new Value(dataType, data, string);
+        return new Value(dataType, data, null); // 字符串值由 lookupInternal 按需补上
     }
 }

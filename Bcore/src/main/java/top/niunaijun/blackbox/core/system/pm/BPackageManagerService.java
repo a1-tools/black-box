@@ -74,6 +74,7 @@ public class BPackageManagerService extends IBPackageManagerService.Stub impleme
     private final Set<String> mMetaDataRepairAttempted = Collections.synchronizedSet(new HashSet<String>());
     /** The resolver index is built lazily because startup() may never run in APK containers. */
     private volatile boolean mComponentIndexBuilt = false;
+    private final Object mIndexBuildLock = new Object();
 
     public static BPackageManagerService get() {
         return sService;
@@ -717,6 +718,10 @@ public class BPackageManagerService extends IBPackageManagerService.Stub impleme
         long l = System.currentTimeMillis();
         InstallResult result = new InstallResult();
         File apkFile = null;
+        // 重装时 CreatePackageExecutor 会先清空应用目录（含 package.conf），复制失败就什么都不剩；
+        // 先把旧目录挪到 .bak，失败时原样换回，成功（记录已落盘）后才删除。
+        File backupDir = null;
+        boolean committed = false;
         try {
             if (!sUserManager.exists(userId)) {
                 sUserManager.createUser(userId);
@@ -813,6 +818,7 @@ public class BPackageManagerService extends IBPackageManagerService.Stub impleme
             
             BProcessManagerService.get().killPackageAsUser(aPackage.packageName, userId);
 
+            backupDir = backupAppDir(aPackage.packageName);
             CopyExecutor.lastError = null;
             int i = BPackageInstallerService.get().installPackageAsUser(bPackageSettings, userId);
             if (i < 0) {
@@ -837,6 +843,7 @@ public class BPackageManagerService extends IBPackageManagerService.Stub impleme
             synchronized (mPackages) {
                 bPackageSettings.setInstalled(true, userId);
                 bPackageSettings.save();
+                committed = true;
             }
             mComponentResolver.removeAllComponents(bPackageSettings.pkg);
             mComponentResolver.addAllComponents(bPackageSettings.pkg);
@@ -850,10 +857,41 @@ public class BPackageManagerService extends IBPackageManagerService.Stub impleme
                     "install apk error: " + t.getClass().getSimpleName()
                             + (t.getMessage() == null ? "" : ": " + t.getMessage()));
         } finally {
+            if (backupDir != null) {
+                if (committed) {
+                    FileUtils.deleteDir(backupDir);
+                } else {
+                    restoreAppDir(result.packageName, backupDir);
+                }
+            }
             if (apkFile != null && option.isFlag(InstallOption.FLAG_URI_FILE)) {
                 FileUtils.deleteDir(apkFile);
             }
             Slog.d(TAG, "install finish: " + (System.currentTimeMillis() - l) + "ms");
+        }
+    }
+
+    /** 把现有应用目录挪到 {@code <pkg>.bak}；没有旧目录或挪动失败返回 null（此时无法回滚）。 */
+    private static File backupAppDir(String packageName) {
+        File appDir = BEnvironment.getAppDir(packageName);
+        if (!appDir.isDirectory()) return null;
+        File backup = new File(appDir.getParentFile(), packageName + ".bak");
+        FileUtils.deleteDir(backup);
+        if (appDir.renameTo(backup)) return backup;
+        Slog.w(TAG, "backup app dir failed, reinstall of " + packageName + " cannot be rolled back");
+        return null;
+    }
+
+    /** 安装失败：丢弃半成品目录，换回备份。 */
+    private static void restoreAppDir(String packageName, File backup) {
+        try {
+            File appDir = BEnvironment.getAppDir(packageName);
+            FileUtils.deleteDir(appDir);
+            if (!backup.renameTo(appDir)) {
+                Slog.e(TAG, "restore app dir failed for " + packageName + ", backup kept at " + backup);
+            }
+        } catch (Throwable t) {
+            Slog.e(TAG, "restore app dir error for " + packageName + ": " + t);
         }
     }
 
@@ -1207,19 +1245,26 @@ public class BPackageManagerService extends IBPackageManagerService.Stub impleme
      */
     void ensureComponentIndex() {
         if (mComponentIndexBuilt) return;
-        synchronized (mPackages) {
+        // 只用独立的构建锁互斥，不再持有 mPackages：修复步骤会解析 zip / resources.arsc、
+        // 可能还会走宿主 PM，原先整段持 mPackages 会把所有 PM 查询挡到建完索引为止。
+        // 所有调用方都是 Binder 入口，进入时不持 mPackages / mInstallLock，不会与此锁形成环。
+        synchronized (mIndexBuildLock) {
             if (mComponentIndexBuilt) return;
             // Exactly one scan per process: mComponentIndexBuilt guards this method, so neither
             // systemReady() nor the lazy query path can trigger a redundant second scan.
             try {
-                mSettings.scanPackage();
+                mSettings.scanPackage(); // 内部只按包短暂持 mPackages
             } catch (Throwable t) {
                 Slog.w(TAG, "scanPackage failed: " + t);
+            }
+            List<BPackageSettings> snapshot;
+            synchronized (mPackages) {
+                snapshot = new ArrayList<>(mPackages.values());
             }
             int failed = 0;
             int activities = 0;
             String firstError = null;
-            for (BPackageSettings ps : mPackages.values()) {
+            for (BPackageSettings ps : snapshot) {
                 try {
                     if (ps == null || ps.pkg == null) continue;
                     // Repair legacy/empty-component records in the same pass, isolated per
@@ -1238,7 +1283,7 @@ public class BPackageManagerService extends IBPackageManagerService.Stub impleme
             }
             mComponentIndexBuilt = true;
             BlackBoxCore.recordIndexRebuild(failed == 0
-                    ? "LAZY OK packages=" + mPackages.size() + " activities=" + activities
+                    ? "LAZY OK packages=" + snapshot.size() + " activities=" + activities
                     : "LAZY FAILED " + failed + " first=" + firstError);
             Slog.d(TAG, "component index built: activities=" + activities + " failed=" + failed);
         }
