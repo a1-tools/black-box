@@ -719,7 +719,7 @@ public class BPackageManagerService extends IBPackageManagerService.Stub impleme
         InstallResult result = new InstallResult();
         File apkFile = null;
         // 重装时 CreatePackageExecutor 会先清空应用目录（含 package.conf），复制失败就什么都不剩；
-        // 先把旧目录挪到 .bak，失败时原样换回，成功（记录已落盘）后才删除。
+        // 先把旧目录挪到 ~bak，失败时原样换回，成功（记录已落盘）后才删除。
         File backupDir = null;
         boolean committed = false;
         try {
@@ -871,11 +871,12 @@ public class BPackageManagerService extends IBPackageManagerService.Stub impleme
         }
     }
 
-    /** 把现有应用目录挪到 {@code <pkg>.bak}；没有旧目录或挪动失败返回 null（此时无法回滚）。 */
+    /** 把现有应用目录挪到 {@code <pkg>~bak}；没有旧目录或挪动失败返回 null（此时无法回滚）。 */
     private static File backupAppDir(String packageName) {
         File appDir = BEnvironment.getAppDir(packageName);
         if (!appDir.isDirectory()) return null;
-        File backup = new File(appDir.getParentFile(), packageName + ".bak");
+        // "~" 不是合法的包名字符，备份目录不可能与任何包的应用目录重名（".bak" 会撞上形如 a.b.bak 的包）
+        File backup = new File(appDir.getParentFile(), packageName + "~bak");
         FileUtils.deleteDir(backup);
         if (appDir.renameTo(backup)) return backup;
         Slog.w(TAG, "backup app dir failed, reinstall of " + packageName + " cannot be rolled back");
