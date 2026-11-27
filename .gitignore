@@ -34,3 +34,6 @@ local.properties
 /tools/m2-uid-poc/uid_inject_v[0-9]
 /tools/m2-uid-poc/uid_poc
 /tools/m2-uid-poc/uid_poc_v[0-9]
+
+# 发版的 APK 放在仓库 releases/，应用内更新从这里下载（见 scripts/publish-update.sh）
+!/releases/*.apk
