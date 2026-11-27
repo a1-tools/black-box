@@ -237,6 +237,24 @@ public class FileUtils {
         }
     }
 
+    /** 与 {@link #copyFile(InputStream, File)} 相同，但失败会抛出而不是静默吞掉，调用方能得知拷贝不完整。 */
+    public static void copyFileStrict(InputStream inputStream, File target) throws IOException {
+        if (inputStream == null) throw new IOException("input stream is null");
+        FileOutputStream outputStream = null;
+        try {
+            outputStream = new FileOutputStream(target);
+            byte[] data = new byte[64 * 1024];
+            int len;
+            while ((len = inputStream.read(data)) != -1) {
+                outputStream.write(data, 0, len);
+            }
+            outputStream.flush();
+        } finally {
+            closeQuietly(inputStream);
+            closeQuietly(outputStream);
+        }
+    }
+
     public static void copyFile(File source, File target) throws IOException {
         FileInputStream inputStream = null;
         FileOutputStream outputStream = null;
@@ -246,15 +264,14 @@ public class FileUtils {
             FileChannel iChannel = inputStream.getChannel();
             FileChannel oChannel = outputStream.getChannel();
 
-            ByteBuffer buffer = ByteBuffer.allocate(1024);
-            while (true) {
+            // 64KB 缓冲：原来 1KB 对大 APK 要几十万次 syscall；写不满时循环写完
+            ByteBuffer buffer = ByteBuffer.allocate(64 * 1024);
+            while (iChannel.read(buffer) != -1) {
+                buffer.flip();
+                while (buffer.hasRemaining()) {
+                    oChannel.write(buffer);
+                }
                 buffer.clear();
-                int r = iChannel.read(buffer);
-                if (r == -1)
-                    break;
-                buffer.limit(buffer.position());
-                buffer.position(0);
-                oChannel.write(buffer);
             }
         } finally {
             closeQuietly(inputStream);

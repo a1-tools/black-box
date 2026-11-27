@@ -27,3 +27,4 @@ local.properties
 *.keystore
 /apk/
 *.apk
+.codegraph/

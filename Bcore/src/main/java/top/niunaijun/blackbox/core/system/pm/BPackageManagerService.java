@@ -724,7 +724,7 @@ public class BPackageManagerService extends IBPackageManagerService.Stub impleme
             if (option.isFlag(InstallOption.FLAG_URI_FILE)) {
                 apkFile = new File(BEnvironment.getCacheDir(), UUID.randomUUID().toString() + ".apk");
                 InputStream inputStream = BlackBoxCore.getContext().getContentResolver().openInputStream(Uri.parse(file));
-                FileUtils.copyFile(inputStream, apkFile);
+                FileUtils.copyFileStrict(inputStream, apkFile);
             } else {
                 apkFile = new File(file);
             }
@@ -844,14 +844,17 @@ public class BPackageManagerService extends IBPackageManagerService.Stub impleme
             onPackageInstalled(bPackageSettings.pkg.packageName, userId);
             return result;
         } catch (Throwable t) {
-            t.printStackTrace();
+            // result.success 默认为 true：不显式标记失败，异常会被调用方当成安装成功
+            Slog.e(TAG, "installPackageAsUser failed: " + t, t);
+            return result.installError(result.packageName,
+                    "install apk error: " + t.getClass().getSimpleName()
+                            + (t.getMessage() == null ? "" : ": " + t.getMessage()));
         } finally {
             if (apkFile != null && option.isFlag(InstallOption.FLAG_URI_FILE)) {
                 FileUtils.deleteDir(apkFile);
             }
             Slog.d(TAG, "install finish: " + (System.currentTimeMillis() - l) + "ms");
         }
-        return result;
     }
 
     private PackageParser.Package parserApk(String file) {

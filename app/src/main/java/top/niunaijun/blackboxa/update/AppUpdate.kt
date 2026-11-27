@@ -150,6 +150,8 @@ object AppUpdate {
             launch(Dispatchers.IO) {
                 val result = try {
                     fetchManifest(url)
+                } catch (t: CancellationException) {
+                    throw t
                 } catch (t: Throwable) {
                     null to reason(t)
                 }
@@ -179,10 +181,17 @@ object AppUpdate {
         newest to firstError
     }
 
-    private fun fetchManifest(url: String): Pair<JSONObject?, String?> = try {
-        client.newBuilder().callTimeout(12, TimeUnit.SECONDS).build()
+    /**
+     * 阻塞的 OkHttp 调用不会响应协程取消，coroutineScope 会一直等到它超时才返回，
+     * 「第一个够新的清单到手就收工」就白做了。这里挂一个取消回调，协程被取消时直接 cancel 掉 Call，
+     * 阻塞中的 execute() 会立刻抛 IOException 退出。
+     */
+    private suspend fun fetchManifest(url: String): Pair<JSONObject?, String?> {
+        val call = client.newBuilder().callTimeout(12, TimeUnit.SECONDS).build()
             .newCall(Request.Builder().url(url).header("User-Agent", UA).build())
-            .execute().use { r ->
+        val handle = coroutineContext[kotlinx.coroutines.Job]?.invokeOnCompletion { call.cancel() }
+        return try {
+            call.execute().use { r ->
                 when {
                     r.code == 404 -> null to null // 这个镜像没有清单，不算错误
                     !r.isSuccessful -> null to "HTTP ${r.code}"
@@ -193,8 +202,11 @@ object AppUpdate {
                     }
                 }
             }
-    } catch (e: Exception) {
-        null to reason(e)
+        } catch (e: Exception) {
+            null to reason(e)
+        } finally {
+            handle?.dispose()
+        }
     }
 
     /** 底层网络异常翻成用户看得懂的话；弹窗里直接显示，别再抛英文栈信息给人看。 */
