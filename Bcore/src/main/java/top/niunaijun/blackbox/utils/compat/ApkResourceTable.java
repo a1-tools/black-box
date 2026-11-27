@@ -42,7 +42,9 @@ public final class ApkResourceTable {
     private static final int TYPE_LAST_COLOR_INT = 0x1f;
 
     private static final int TYPE_FLAG_SPARSE = 0x01;
+    private static final int TYPE_FLAG_OFFSET16 = 0x02;
     private static final int ENTRY_FLAG_COMPLEX = 0x0001;
+    private static final int ENTRY_FLAG_COMPACT = 0x0008;
     private static final int NO_ENTRY = -1;
 
     /** Reference chains longer than this are treated as broken data. */
@@ -269,18 +271,32 @@ public final class ApkResourceTable {
                     break;
                 }
             }
+        } else if ((flags & TYPE_FLAG_OFFSET16) != 0) {
+            // 16 位偏移（单位 4 字节），0xFFFF 表示没有这个 entry
+            if (entryIdx < 0 || entryIdx >= entryCount) return null;
+            int o = offsetsPos + entryIdx * 2;
+            if (o + 2 > arsc.length) return null;
+            int v = ApkManifestParser.u16(arsc, o);
+            entryOffset = v == 0xFFFF ? NO_ENTRY : v * 4;
         } else {
             if (entryIdx < 0 || entryIdx >= entryCount) return null;
             int o = offsetsPos + entryIdx * 4;
             if (o + 4 > arsc.length) return null;
             entryOffset = ApkManifestParser.u32(arsc, o);
         }
-        if (entryOffset == NO_ENTRY || entryOffset == 0xFFFFFFFF) return null;
+        if (entryOffset == NO_ENTRY) return null;
 
         int entryPos = start + entriesStart + entryOffset;
         if (entryPos + 8 > arsc.length) return null;
         int entrySize = ApkManifestParser.u16(arsc, entryPos);
         int entryFlags = ApkManifestParser.u16(arsc, entryPos + 2);
+        if ((entryFlags & ENTRY_FLAG_COMPACT) != 0) {
+            // compact entry：key 占原 size 字段，数据类型在 flags 高字节，数据紧跟其后
+            if (entryPos + 8 > arsc.length) return null;
+            int compactType = (entryFlags >> 8) & 0xff;
+            if (compactType == TYPE_NULL) return null;
+            return new Value(compactType, ApkManifestParser.u32(arsc, entryPos + 4), null);
+        }
         if ((entryFlags & ENTRY_FLAG_COMPLEX) != 0) return null; // bag/array, not a simple value
 
         int valuePos = entryPos + entrySize;

@@ -28,3 +28,9 @@ local.properties
 /apk/
 *.apk
 .codegraph/
+
+# PoC 编译产物不入库，源码在 tools/m2-uid-poc/*.c
+/tools/m2-uid-poc/uid_inject
+/tools/m2-uid-poc/uid_inject_v[0-9]
+/tools/m2-uid-poc/uid_poc
+/tools/m2-uid-poc/uid_poc_v[0-9]

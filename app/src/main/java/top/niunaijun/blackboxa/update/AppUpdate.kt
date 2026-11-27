@@ -273,7 +273,7 @@ object AppUpdate {
         dir.listFiles()?.forEach { if (it != part) it.delete() } // 其它版本、或上次校验失败的包
 
         var have = part.length()
-        if (info.size in 1..have) { // 残留比整包还大，不能用
+        if (info.size > 0 && have > info.size) { // 残留比整包还大，不能用（刚好等于整包则直接走校验）
             part.delete()
             have = 0
         }

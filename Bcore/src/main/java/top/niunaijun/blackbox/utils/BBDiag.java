@@ -43,6 +43,8 @@ public final class BBDiag {
     private static final long MAX_TRACE = 256 * 1024;
     private static final int FLUSH_BYTES = 4096;
     private static final long FLUSH_DELAY_MS = 120L;
+    /** 内存缓冲上限：写线程没起来或目录一直不可用时不能无限增长。 */
+    private static final int MAX_PENDING = 64 * 1024;
 
     private static volatile Context sContext;
     private static volatile File sDir;
@@ -69,9 +71,12 @@ public final class BBDiag {
         }
     };
 
-    /** Pure-arithmetic timestamp: no SimpleDateFormat, no global synchronization, no Date. */
-    private static final long TZ_OFFSET =
-            TimeZone.getDefault().getOffset(System.currentTimeMillis());
+    /** 时区偏移每 10 分钟刷新一次，夏令时切换后不会一直偏一小时；竞争只会多算一次，无需加锁。 */
+    private static volatile long sTzOffset;
+    private static volatile long sTzAt;
+
+    /** 同一个异常只落盘一次（CrashHandler 与 DiagCrashHandler 先后链式调用时会重复进入）。 */
+    private static volatile Throwable sLastCrashed;
 
     private BBDiag() {
     }
@@ -103,7 +108,12 @@ public final class BBDiag {
     }
 
     private static String stamp() {
-        long t = (System.currentTimeMillis() + TZ_OFFSET) % 86400000L;
+        long now = System.currentTimeMillis();
+        if (now - sTzAt > 600000L) {
+            sTzOffset = TimeZone.getDefault().getOffset(now);
+            sTzAt = now;
+        }
+        long t = (now + sTzOffset) % 86400000L;
         if (t < 0) t += 86400000L;
         int h = (int) (t / 3600000L);
         int m = (int) ((t / 60000L) % 60);
@@ -172,7 +182,16 @@ public final class BBDiag {
             sStageDirty = false;
         }
         File d = dir();
-        if (d == null) return;
+        if (d == null) {
+            // context 还没就绪：别把早期的 trace / stage 丢掉，放回缓冲等下次 flush
+            synchronized (BUF_LOCK) {
+                if (chunk != null && sPending.length() + chunk.length() <= MAX_PENDING) {
+                    sPending.insert(0, chunk);
+                }
+                if (stageLine != null) sStageDirty = true;
+            }
+            return;
+        }
         if (chunk != null && !chunk.isEmpty()) appendTrace(d, chunk);
         if (stageLine != null) writeFile(new File(d, STAGE), stageLine, false);
     }
@@ -214,7 +233,7 @@ public final class BBDiag {
             String line = "[" + stamp() + "][p" + Process.myPid() + "]["
                     + (tag == null ? "-" : tag) + "] " + String.valueOf(msg) + "\n";
             synchronized (BUF_LOCK) {
-                sPending.append(line);
+                if (sPending.length() < MAX_PENDING) sPending.append(line);
             }
             scheduleFlush(false);
         } catch (Throwable ignored) {
@@ -229,7 +248,7 @@ public final class BBDiag {
             synchronized (BUF_LOCK) {
                 sPendingStage = "[" + stamp() + "][p" + Process.myPid() + "] " + value + "\n";
                 sStageDirty = true;
-                sPending.append("[").append(stamp()).append("][p").append(Process.myPid())
+                if (sPending.length() < MAX_PENDING) sPending.append("[").append(stamp()).append("][p").append(Process.myPid())
                         .append("][stage] ").append(value).append("\n");
             }
             scheduleFlush(false);
@@ -239,6 +258,8 @@ public final class BBDiag {
 
     /** Persist a full crash report, including the stage and the cause chain. */
     public static void crash(Thread thread, Throwable e) {
+        if (e != null && e == sLastCrashed) return;
+        sLastCrashed = e;
         try {
             // A crashing process will die: synchronously drain everything we buffered first so
             // the on-screen report is complete even though the normal async flusher never runs.
@@ -258,7 +279,10 @@ public final class BBDiag {
         sb.append("pid: ").append(Process.myPid()).append("\n");
         sb.append("thread: ").append(thread == null ? "unknown" : thread.getName()).append("\n");
         try {
-            sb.append("stage: ").append(readTail(new File(d, STAGE), 512).trim()).append("\n");
+            // stage.txt 由所有进程共享，读文件可能拿到别的进程的 stage；优先用本进程内存里的最后一次
+            String mem = sPendingStage;
+            sb.append("stage: ").append(mem != null ? mem.trim()
+                    : readTail(new File(d, STAGE), 512).trim()).append("\n");
         } catch (Throwable ignored) {
         }
         sb.append("throwable: ").append(String.valueOf(e)).append("\n");

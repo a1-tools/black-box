@@ -15,6 +15,8 @@
 #include <Hook/RuntimeHook.h>
 #include "Utils/HexDump.h"
 #include "hidden_api.h"
+#include <sys/uio.h>
+#include <unistd.h>
 
 struct {
     JavaVM *vm;
@@ -103,6 +105,8 @@ void init(JNIEnv *env, jobject clazz, jint api_level) {
 void addIORule(JNIEnv *env, jclass clazz, jstring target_path,
                jstring relocate_path) {
     ALOGD("set addIORule");
+    // 注意：IO::addRule 只保存 char* 指针、不复制，所以这里故意不调用 ReleaseStringUTFChars，
+    // 释放后规则里的指针会悬空。每条规则泄漏的两个短字符串是有意为之（规则在进程生命周期内有效）。
     IO::addRule(env->GetStringUTFChars(target_path, JNI_FALSE),
                 env->GetStringUTFChars(relocate_path, JNI_FALSE));
 }
@@ -165,7 +169,12 @@ static jlong getArtMethodPtr(JNIEnv *env, jclass, jobject method) {
 // Only called with pointers obtained from getArtMethodPtr — not arbitrary memory.
 static jint readNativeInt(JNIEnv *env, jclass, jlong address) {
     if (address == 0) return 0;
-    return *reinterpret_cast<jint *>(address);
+    // 用 process_vm_readv 读自身内存：地址非法时返回错误而不是 SIGSEGV 把进程带走
+    jint value = 0;
+    struct iovec local = {&value, sizeof(value)};
+    struct iovec remote = {reinterpret_cast<void *>(address), sizeof(value)};
+    if (process_vm_readv(getpid(), &local, 1, &remote, 1, 0) != (ssize_t) sizeof(value)) return 0;
+    return value;
 }
 
 static JNINativeMethod gMethods[] = {

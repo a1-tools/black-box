@@ -62,11 +62,6 @@ public final class ApkManifestParser {
      */
     private static final LruCache<String, ManifestData> sCache = new LruCache<>(16);
 
-    /** Drop cached manifests, e.g. after an install/uninstall changes the stored APK. */
-    public static void clearCache() {
-        sCache.evictAll();
-    }
-
     private static String cacheKey(String apkPath) {
         try {
             File f = new File(apkPath);
@@ -487,7 +482,8 @@ public final class ApkManifestParser {
         int flags = u32(xml, start + 16);
         int stringsStart = u32(xml, start + 20);
         boolean utf8 = (flags & UTF8_FLAG) != 0;
-        if (count <= 0 || count > 200000 || stringsStart <= 0) return new String[0];
+        // 上限由 chunk 自身大小决定（每个字符串至少占 4 字节偏移），不再用固定的 20 万条截断大 arsc
+        if (count <= 0 || count > (size - 28) / 4 || stringsStart <= 0) return new String[0];
         if ((long) start + stringsStart > xml.length) return new String[0];
         String[] pool = new String[count];
         int offsets = start + 28;

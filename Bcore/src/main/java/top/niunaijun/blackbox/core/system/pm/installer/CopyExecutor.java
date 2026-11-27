@@ -18,7 +18,10 @@ public class CopyExecutor implements Executor {
 
     public static final String TAG = "CopyExecutor";
 
-    /** Short reason of the last failure, propagated to the install toast for diagnosis. */
+    /**
+     * Short reason of the last failure, propagated to the install toast for diagnosis.
+     * 静态字段是安全的：唯一调用方 installPackageAsUserLocked 整个流程都在 mInstallLock 内，安装是串行的。
+     */
     public static volatile String lastError;
 
     private static String describe(Throwable t) {
@@ -50,22 +53,16 @@ public class CopyExecutor implements Executor {
             }
             return -3;
         }
-        try {
-            if (!option.isFlag(InstallOption.FLAG_SYSTEM)) {
-                try {
-                    NativeUtils.copyNativeLib(new File(ps.pkg.baseCodePath),
-                            BEnvironment.getAppLibDir(ps.pkg.packageName));
-                } catch (Exception e) {
-                    lastError = describe(e);
-                    Slog.e(TAG, "copyNativeLib failed: apk=" + ps.pkg.baseCodePath
-                            + ", libDir=" + BEnvironment.getAppLibDir(ps.pkg.packageName), e);
-                    return -3;
-                }
+        if (!option.isFlag(InstallOption.FLAG_SYSTEM)) {
+            try {
+                NativeUtils.copyNativeLib(new File(ps.pkg.baseCodePath),
+                        BEnvironment.getAppLibDir(ps.pkg.packageName));
+            } catch (Exception e) {
+                lastError = describe(e);
+                Slog.e(TAG, "copyNativeLib failed: apk=" + ps.pkg.baseCodePath
+                        + ", libDir=" + BEnvironment.getAppLibDir(ps.pkg.packageName), e);
+                return -3;
             }
-        } catch (Exception e) {
-            lastError = describe(e);
-            Slog.e(TAG, "copy step failed", e);
-            return -1;
         }
         if (option.isFlag(InstallOption.FLAG_STORAGE)) {
 
@@ -88,8 +85,6 @@ public class CopyExecutor implements Executor {
                 Slog.e(TAG, "copy apk failed: " + origFile + " -> " + newFile, e);
                 return -4;
             }
-        } else if (option.isFlag(InstallOption.FLAG_SYSTEM)) {
-
         }
         return 0;
     }
